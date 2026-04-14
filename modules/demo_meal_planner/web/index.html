@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meal Planner (Demo)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Hosted Webview Demo</p>
+          <h1>Meal Planner (Demo)</h1>
+          <p class="subcopy">
+            This module is a living example of ChattyCog loading a module's own browser-style UI
+            directly into a tab.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="save-draft" class="primary">Save draft</button>
+          <button id="reset-draft">Reset</button>
+        </div>
+      </header>
+
+      <section class="stats-grid">
+        <article class="stat-card">
+          <span class="stat-label">Busy days tracked</span>
+          <strong id="busy-day-count">0</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">Plan completion</span>
+          <strong id="completion-score">0%</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">Weeknight limit</span>
+          <strong id="limit-display">-</strong>
+        </article>
+      </section>
+
+      <main class="layout">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Constraints</h2>
+            <p>Capture the practical inputs that shape the plan.</p>
+          </div>
+
+          <label class="field">
+            <span>Diet constraints</span>
+            <textarea id="diet_constraints" rows="5" placeholder="Allergies, dislikes, macros, preferences..."></textarea>
+          </label>
+
+          <div class="field-row">
+            <label class="field">
+              <span>Budget level</span>
+              <select id="budget_level">
+                <option value="">Choose...</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Weeknight cooking limit (minutes)</span>
+              <input id="weeknight_cooking_limit_min" type="number" min="0" max="120" step="5" />
+            </label>
+          </div>
+
+          <label class="field">
+            <span>Busy days (from Work Schedule)</span>
+            <textarea id="busy_days" rows="5" placeholder="List the days that need low-effort meals..."></textarea>
+          </label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Planning board</h2>
+            <p>Draft the meals, grocery list, and prep plan together.</p>
+          </div>
+
+          <div class="tab-strip" role="tablist" aria-label="Meal planning views">
+            <button class="tab active" data-tab="meal-plan">Meal plan</button>
+            <button class="tab" data-tab="grocery-list">Grocery list</button>
+            <button class="tab" data-tab="prep-plan">Prep plan</button>
+          </div>
+
+          <div class="tab-panel active" data-panel="meal-plan">
+            <label class="field">
+              <span>Meal plan draft</span>
+              <textarea id="meal_plan_draft" rows="12" placeholder="Monday -> meals..."></textarea>
+            </label>
+          </div>
+
+          <div class="tab-panel" data-panel="grocery-list">
+            <label class="field">
+              <span>Grocery list draft</span>
+              <textarea id="grocery_list_draft" rows="12" placeholder="Consolidated list..."></textarea>
+            </label>
+          </div>
+
+          <div class="tab-panel" data-panel="prep-plan">
+            <label class="field">
+              <span>Prep plan</span>
+              <textarea id="prep_plan" rows="12" placeholder="What to prep, when, and how long..."></textarea>
+            </label>
+          </div>
+        </section>
+
+        <aside class="panel side-panel">
+          <div class="panel-heading">
+            <h2>Handoff</h2>
+            <p>Keep artifacts and a clean summary ready for the bridge.</p>
+          </div>
+
+          <label class="field">
+            <span>Artifacts</span>
+            <textarea id="artifacts" rows="4" placeholder="Chatty_Sandbox/meals.md"></textarea>
+          </label>
+
+          <label class="field">
+            <span>Snapshot preview</span>
+            <textarea id="snapshot_preview" rows="12" readonly></textarea>
+          </label>
+
+          <button id="refresh-preview">Refresh preview</button>
+
+          <div class="note-card">
+            <strong>Cross-module tip</strong>
+            <p>
+              Pull your busy days from the Work Schedule module first, then ask ChattyCog in the
+              main Chat tab to coordinate the meal plan with errands or prep windows.
+            </p>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

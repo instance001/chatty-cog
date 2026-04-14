@@ -1,0 +1,7 @@
+{
+  "kind": "webview",
+  "auto_launch": true,
+  "title": "Work Schedule (Demo)",
+  "file": "web/index.html",
+  "notes": "Bundled hosted webview example for weekly planning and cross-module handoff."
+}

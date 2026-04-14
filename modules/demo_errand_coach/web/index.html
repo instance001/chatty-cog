@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Errand Coach (AI Demo)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Hosted Webview Demo</p>
+          <h1>Errand Coach (AI Demo)</h1>
+          <p class="subcopy">
+            Use this intake board to clean up the task pile, then drop into the ChattyCog bridge to
+            run the module AI and turn it into a checklist.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="save-state" class="primary">Save intake</button>
+          <button id="reset-state">Reset</button>
+        </div>
+      </header>
+
+      <section class="stats-grid">
+        <article class="stat-card">
+          <span class="label">Errands listed</span>
+          <strong id="errand-count">0</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Estimated load</span>
+          <strong id="budget-display">-</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Checklist rows</span>
+          <strong id="checklist-count">0</strong>
+        </article>
+      </section>
+
+      <main class="layout">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Intake</h2>
+            <p>Dump the task pile and the real-world constraints first.</p>
+          </div>
+
+          <label class="field">
+            <span>Errands / tasks</span>
+            <textarea id="errands_dump" rows="12" placeholder="- Pick up...&#10;- Call...&#10;- Buy..."></textarea>
+          </label>
+
+          <label class="field">
+            <span>Constraints</span>
+            <textarea id="constraints" rows="8" placeholder="Time windows, locations, dependencies..."></textarea>
+          </label>
+
+          <label class="field">
+            <span>Time budget (minutes)</span>
+            <input id="time_budget_min" type="number" min="0" max="720" step="5" />
+          </label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Checklist output</h2>
+            <p>Paste the module AI result here after running it from the bridge.</p>
+          </div>
+
+          <label class="field">
+            <span>Checklist output</span>
+            <textarea id="checklist_output" rows="16" placeholder="- [ ] First stop&#10;- [ ] Second stop"></textarea>
+          </label>
+
+          <label class="field">
+            <span>Checklist preview</span>
+            <textarea id="checklist_preview" rows="10" readonly></textarea>
+          </label>
+        </section>
+
+        <aside class="panel side-panel">
+          <div class="panel-heading">
+            <h2>Bridge note</h2>
+            <p>Keep the handoff to ChattyCog clean and grounded.</p>
+          </div>
+
+          <label class="field">
+            <span>AI handoff preview</span>
+            <textarea id="handoff_preview" rows="15" readonly></textarea>
+          </label>
+
+          <button id="refresh-preview">Refresh preview</button>
+
+          <div class="note-card">
+            <strong>Next step</strong>
+            <p>
+              Open the collapsed <em>ChattyCog bridge</em> panel below this hosted UI to run the
+              module AI, then paste or copy its output back into the checklist box here.
+            </p>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

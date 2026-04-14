@@ -1,0 +1,7 @@
+{
+  "module_id": "demo_meal_planner",
+  "display_name": "Meal Planner (Demo)",
+  "icon": "fork_knife",
+  "description": "Demo department for meal planning that coordinates with your work schedule (prep time, busy days)."
+}
+

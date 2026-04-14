@@ -1,0 +1,158 @@
+{
+  "title": "Meal Planner (Demo)",
+  "description": "Create a meal plan + grocery list that fits your time, budget, and constraints. Use the Work Schedule module to identify busy days.",
+  "sections": [
+    {
+      "id": "constraints",
+      "title": "Constraints",
+      "description": "Capture the lifestyle inputs that shape the plan.",
+      "blocks": [
+        {
+          "kind": "callout",
+          "title": "Cross-Module Tip",
+          "tone": "info",
+          "text": "Pull busy days from the Work Schedule module before finalizing the meal plan."
+        }
+      ],
+      "fields": ["diet_constraints", "budget_level", "weeknight_cooking_limit_min", "busy_days"]
+    },
+    {
+      "id": "planning",
+      "title": "Planning Board",
+      "description": "Draft the plan itself and the prep strategy.",
+      "blocks": [
+        {
+          "kind": "markdown",
+          "title": "Planning Flow",
+          "text": "## Suggested flow\n1. Start with busy days\n2. Draft low-effort meals first\n3. Build the grocery list from the draft\n4. Finish with prep notes"
+        },
+        {
+          "kind": "tabs",
+          "id": "meal_planning_tabs",
+          "title": "Planning Tabs",
+          "view_presets": [
+            { "label": "Plan View", "pane_ids": ["meal_plan_tab"] },
+            { "label": "Shop View", "pane_ids": ["grocery_tab"] },
+            { "label": "Prep View", "pane_ids": ["prep_tab"] }
+          ],
+          "tabs": [
+            {
+              "id": "meal_plan_tab",
+              "title": "Meal Plan",
+              "fields": ["meal_plan_draft"]
+            },
+            {
+              "id": "grocery_tab",
+              "title": "Grocery List",
+              "fields": ["grocery_list_draft"]
+            },
+            {
+              "id": "prep_tab",
+              "title": "Prep Plan",
+              "fields": ["prep_plan"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "handoff",
+      "title": "Handoff",
+      "description": "Store the file paths or outputs worth surfacing elsewhere.",
+      "blocks": [
+        {
+          "kind": "actions",
+          "actions": ["save", "reload", "open_folder", "open_manual"]
+        },
+        {
+          "kind": "file_list",
+          "title": "Module Folder Snapshot",
+          "path": ".",
+          "max_entries": 6,
+          "empty": "No files in this module folder yet."
+        },
+        {
+          "kind": "artifact_preview",
+          "title": "Artifact Preview",
+          "field": "artifacts",
+          "empty": "Add a module-local file path in Artifacts to preview it here."
+        }
+      ],
+      "fields": ["artifacts"],
+      "sidebar": true
+    }
+  ],
+  "fields": [
+    {
+      "id": "diet_constraints",
+      "label": "Diet constraints",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "Allergies, dislikes, preferences, macros...",
+      "help": "Keep this practical: what should the planner avoid or optimize for?",
+      "section": "constraints"
+    },
+    {
+      "id": "budget_level",
+      "label": "Budget level",
+      "kind": "choice",
+      "options": ["low", "medium", "high"],
+      "help": "A rough budget is enough.",
+      "section": "constraints"
+    },
+    {
+      "id": "weeknight_cooking_limit_min",
+      "label": "Weeknight cooking limit (minutes)",
+      "kind": "number",
+      "min": 0,
+      "max": 120,
+      "help": "Set the realistic maximum for tired weeknights.",
+      "section": "constraints"
+    },
+    {
+      "id": "busy_days",
+      "label": "Busy days (from Work Schedule)",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "Days where you need low-prep meals...",
+      "help": "This is where the Work Schedule module can feed into the meal plan.",
+      "section": "constraints"
+    },
+    {
+      "id": "meal_plan_draft",
+      "label": "Meal plan draft",
+      "kind": "multiline",
+      "rows": 8,
+      "placeholder": "Day -> meals...",
+      "help": "Keep it simple and editable.",
+      "section": "planning"
+    },
+    {
+      "id": "grocery_list_draft",
+      "label": "Grocery list draft",
+      "kind": "multiline",
+      "rows": 8,
+      "placeholder": "Consolidated list...",
+      "help": "Consolidate ingredients after the meal plan is drafted.",
+      "section": "planning"
+    },
+    {
+      "id": "prep_plan",
+      "label": "Prep plan",
+      "kind": "multiline",
+      "rows": 6,
+      "placeholder": "What to prep, when, and how long...",
+      "help": "Use this for batch cooking or low-effort nights.",
+      "section": "planning"
+    },
+    {
+      "id": "artifacts",
+      "label": "Artifacts (optional)",
+      "kind": "multiline",
+      "rows": 3,
+      "placeholder": "Chatty_Sandbox/meals.md",
+      "help": "Store exported files or handoff docs here.",
+      "section": "handoff"
+    }
+  ]
+}

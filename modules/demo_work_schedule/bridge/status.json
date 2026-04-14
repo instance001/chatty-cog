@@ -1,0 +1,24 @@
+{
+  "module_id": "demo_work_schedule",
+  "summary": "Work Schedule is 0% filled out. 0 project(s) and 0 schedule line(s) are currently tracked. Timezone is not set and work window is not set. Next handoff focus: draft the schedule timeline. Room session: inactive.",
+  "snapshot": "# Work Schedule Snapshot\n\n- Timezone: not set\n- Work window: not set\n\n## Focus Top 3\n(empty)\n\n## Non-negotiables\n(empty)\n\n## Timeline\n(empty)\n\n## Risks\n(none listed)\n\n## Artifacts\n(none)",
+  "event_type": "suspend_rundown",
+  "tags": [
+    "work_schedule",
+    "planning",
+    "webview",
+    "room_aware"
+  ],
+  "payload": {
+    "completion": 0,
+    "projectCount": 0,
+    "room": {
+      "activeForModule": true,
+      "participantCount": 1,
+      "sessionActive": false,
+      "sessionRevision": 0
+    },
+    "timelineCount": 0
+  },
+  "updated_at_unix_ms": 1776210216321
+}

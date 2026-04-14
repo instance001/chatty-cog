@@ -1,0 +1,65 @@
+{
+  "title": "Errand Coach (AI Demo)",
+  "description": "Dump errands + constraints here, then use the Module AI runner below to turn it into a checklist.",
+  "sections": [
+    {
+      "id": "intake",
+      "title": "Intake",
+      "description": "Start with the raw task list and constraints.",
+      "fields": ["errands_dump", "constraints", "time_budget_min"]
+    },
+    {
+      "id": "output",
+      "title": "Checklist Output",
+      "description": "Paste or refine the module AI result here.",
+      "blocks": [
+        {
+          "kind": "checklist",
+          "title": "Checklist Preview",
+          "field": "checklist_output",
+          "empty": "Run the module AI or paste checklist-style lines to preview them here."
+        }
+      ],
+      "fields": ["checklist_output"],
+      "sidebar": true
+    }
+  ],
+  "fields": [
+    {
+      "id": "errands_dump",
+      "label": "Errands / tasks (dump)",
+      "kind": "multiline",
+      "rows": 8,
+      "placeholder": "- Pick up...\n- Call...\n- Buy...",
+      "help": "This is the messy input area. Just dump everything in.",
+      "section": "intake"
+    },
+    {
+      "id": "constraints",
+      "label": "Constraints",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "Time windows, locations, dependencies...",
+      "help": "Anything that affects order, timing, or feasibility belongs here.",
+      "section": "intake"
+    },
+    {
+      "id": "time_budget_min",
+      "label": "Time budget (minutes)",
+      "kind": "number",
+      "min": 0,
+      "max": 720,
+      "help": "Optional, but useful for getting a realistic checklist.",
+      "section": "intake"
+    },
+    {
+      "id": "checklist_output",
+      "label": "Checklist output (paste from AI runner)",
+      "kind": "multiline",
+      "rows": 10,
+      "placeholder": "Paste the AI's checklist here for reference.",
+      "help": "Saving the final checklist here makes the module debrief much better.",
+      "section": "output"
+    }
+  ]
+}

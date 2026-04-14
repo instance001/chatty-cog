@@ -1,0 +1,151 @@
+{
+  "title": "Work Schedule (Demo)",
+  "description": "Fill in your week so other departments (like Meal Planner) can plan around your busy days and prep windows.",
+  "sections": [
+    {
+      "id": "week_setup",
+      "title": "Week Setup",
+      "description": "Capture the fixed shape of the week first.",
+      "blocks": [
+        {
+          "kind": "callout",
+          "title": "Cross-Module Tip",
+          "tone": "info",
+          "text": "Meal Planner can use this week's busy days, work window, and artifacts when planning low-effort meals."
+        }
+      ],
+      "fields": ["timezone", "work_window", "focus_top3"]
+    },
+    {
+      "id": "planning",
+      "title": "Planning Board",
+      "description": "Lay out deadlines, blocks, and the draft schedule.",
+      "blocks": [
+        {
+          "kind": "timeline",
+          "title": "Schedule Timeline",
+          "field": "draft_schedule_notes",
+          "max_rows": 10,
+          "empty": "Add lines like 09:00 | Deep work or [Mon] Project review to preview them here."
+        }
+      ],
+      "fields": ["projects", "draft_schedule_notes"]
+    },
+    {
+      "id": "handoff",
+      "title": "Constraints & Handoff",
+      "description": "Keep blockers and cross-module artifacts in one place.",
+      "blocks": [
+        {
+          "kind": "stat",
+          "label": "Current Timezone",
+          "field": "timezone",
+          "empty": "Set the timezone first."
+        },
+        {
+          "kind": "actions",
+          "actions": ["save", "reload", "open_folder", "open_handshake"]
+        },
+        {
+          "kind": "inspector",
+          "id": "schedule_handoff_inspector",
+          "title": "Schedule Inspector",
+          "panes": [
+            {
+              "id": "constraints_panel",
+              "title": "Fixed Constraints",
+              "summary_field": "non_negotiables",
+              "default_open": true,
+              "fields": ["non_negotiables"]
+            },
+            {
+              "id": "risks_panel",
+              "title": "Risks / Conflicts",
+              "summary_field": "risks_conflicts",
+              "fields": ["risks_conflicts"]
+            },
+            {
+              "id": "artifacts_panel",
+              "title": "Artifacts",
+              "summary_field": "artifacts",
+              "fields": ["artifacts"]
+            }
+          ]
+        }
+      ],
+      "sidebar": true
+    }
+  ],
+  "fields": [
+    {
+      "id": "timezone",
+      "label": "Timezone",
+      "kind": "singleline",
+      "placeholder": "e.g. Australia/Brisbane",
+      "help": "Use the timezone that the rest of your week should be planned in.",
+      "section": "week_setup"
+    },
+    {
+      "id": "work_window",
+      "label": "Work window",
+      "kind": "singleline",
+      "placeholder": "e.g. Mon-Fri 9:00-17:00",
+      "help": "Summarize the normal working pattern in one line.",
+      "section": "week_setup"
+    },
+    {
+      "id": "non_negotiables",
+      "label": "Non-negotiables",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "Appointments, pickups, fixed commitments...",
+      "help": "List anything that must happen and cannot be moved.",
+      "section": "handoff"
+    },
+    {
+      "id": "projects",
+      "label": "Projects (with deadlines)",
+      "kind": "multiline",
+      "rows": 6,
+      "placeholder": "- Project A: deadline\n- Project B: deadline",
+      "help": "A short bullet list is enough here.",
+      "section": "planning"
+    },
+    {
+      "id": "focus_top3",
+      "label": "This week's focus (top 3)",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "- 1\n- 2\n- 3",
+      "help": "These are the most important outcomes for the week.",
+      "section": "week_setup"
+    },
+    {
+      "id": "draft_schedule_notes",
+      "label": "Draft schedule notes",
+      "kind": "multiline",
+      "rows": 7,
+      "placeholder": "Blocks, deep work windows, breaks, admin time...",
+      "help": "Sketch the week in whatever format feels natural.",
+      "section": "planning"
+    },
+    {
+      "id": "risks_conflicts",
+      "label": "Risks / conflicts",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "What might derail the plan?",
+      "help": "Useful for Bookkeeper debriefs and cross-module awareness.",
+      "section": "handoff"
+    },
+    {
+      "id": "artifacts",
+      "label": "Artifacts (optional)",
+      "kind": "multiline",
+      "rows": 3,
+      "placeholder": "Chatty_Sandbox/schedule.md",
+      "help": "Paths to files that another module or the orchestrator may need.",
+      "section": "handoff"
+    }
+  ]
+}

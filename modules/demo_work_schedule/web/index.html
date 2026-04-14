@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Work Schedule (Demo)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Hosted Webview Demo</p>
+          <h1>Work Schedule (Demo)</h1>
+          <p class="subcopy">
+            Plan the shape of the week here, then let Meal Planner and ChattyCog coordinate around
+            your busy days.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="save-state" class="primary">Save week</button>
+          <button id="reset-state">Reset</button>
+        </div>
+      </header>
+
+      <section class="stats-grid">
+        <article class="stat-card">
+          <span class="label">Projects tracked</span>
+          <strong id="project-count">0</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Timeline entries</span>
+          <strong id="timeline-count">0</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Week completeness</span>
+          <strong id="completion-score">0%</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Shared room</span>
+          <strong id="room-mode">standalone</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Local role</span>
+          <strong id="room-role">independent</strong>
+        </article>
+        <article class="stat-card">
+          <span class="label">Sync state</span>
+          <strong id="sync-status">local only</strong>
+        </article>
+      </section>
+
+      <section class="panel room-panel">
+        <div class="panel-heading">
+          <h2>Shared room session</h2>
+          <p>
+            This planning board can follow ChattyCog's shared-room session policy when the module is
+            hosted in a networked room.
+          </p>
+        </div>
+
+        <div class="room-grid">
+          <div class="note-card">
+            <strong id="room-session-heading">No active room session</strong>
+            <p id="room-session-detail">This copy is currently running as a local planning board.</p>
+          </div>
+
+          <div class="note-card">
+            <strong id="room-policy-heading">Editing policy</strong>
+            <p id="room-policy-detail">Local editing is available.</p>
+          </div>
+
+          <div class="note-card">
+            <strong>Participants</strong>
+            <p id="room-participants">Just this device for now.</p>
+          </div>
+        </div>
+
+        <div class="note-card testing-card">
+          <strong id="room-action-heading">Testing hint</strong>
+          <p id="room-action-hint">
+            Start a module session from ChattyCog's Networking tab, then share this module state to selected peers to mirror the plan.
+          </p>
+        </div>
+
+        <div class="sync-strip" aria-label="Session sync status">
+          <span id="sync-revision-badge" class="sync-badge local">Revision local</span>
+          <span id="sync-source-badge" class="sync-badge subtle">No host revision applied yet</span>
+          <span id="presence-badge" class="sync-badge subtle">Host idle</span>
+          <span id="last-activity-badge" class="sync-badge subtle">Last activity not seen yet</span>
+        </div>
+
+        <div id="room-toast-stack" class="room-toast-stack" aria-live="polite" aria-atomic="true"></div>
+
+        <div class="room-events-layout">
+          <div class="note-card room-actions-card">
+            <strong>Room activity demo</strong>
+            <p>
+              These buttons emit lightweight room events so peers can see quick coordination signals
+              without waiting for a full shared-state push.
+            </p>
+            <div class="event-action-grid">
+              <button id="event-ready" type="button">Ready for review</button>
+              <button id="event-delay" type="button">Need more time</button>
+              <button id="event-claim" type="button">Claim next block</button>
+            </div>
+            <label class="field room-note-field">
+              <span>Short room note</span>
+              <div class="room-note-row">
+                <input id="room-note-input" type="text" placeholder="Quick note for the room..." />
+                <button id="event-note" type="button">Send note</button>
+              </div>
+            </label>
+            <p id="room-event-status" class="room-event-status">
+              Local activity feed only. Open this inside ChattyCog to test networked room events.
+            </p>
+          </div>
+
+          <div class="note-card room-feed-card">
+            <strong>Recent room events</strong>
+            <p>Lightweight event stream for host/follower coordination.</p>
+            <ul id="room-event-list" class="room-event-list">
+              <li class="room-event-empty">No room activity yet.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="note-card asset-bridge-card">
+          <div class="asset-heading">
+            <div>
+              <strong>Incoming bridge assets</strong>
+              <p>
+                Approved files or text payloads delivered into the module's `lesson_assets` lane
+                appear here. This demo imports them into the planner without giving up standalone
+                ownership of the data.
+              </p>
+            </div>
+            <span id="incoming-asset-status" class="sync-badge subtle">Local only</span>
+          </div>
+
+          <div class="asset-layout">
+            <div class="asset-list-card">
+              <strong>Waiting in lane</strong>
+              <ul id="incoming-asset-list" class="incoming-asset-list">
+                <li class="incoming-asset-empty">No incoming assets waiting.</li>
+              </ul>
+            </div>
+
+            <div class="asset-preview-card">
+              <strong id="incoming-asset-title">No asset selected</strong>
+              <p id="incoming-asset-meta" class="asset-meta">
+                Pick an incoming asset to preview or import it into this planning board.
+              </p>
+              <textarea id="incoming-asset-preview" rows="8" readonly>(preview appears here)</textarea>
+              <div class="asset-actions">
+                <button id="incoming-asset-open" type="button">Open payload</button>
+                <button id="incoming-asset-apply" type="button" class="primary">Apply to planner</button>
+                <button id="incoming-asset-consume" type="button">Mark consumed</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <main class="layout">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Week setup</h2>
+            <p>Capture the fixed shape of the week first.</p>
+          </div>
+
+          <div class="field-row">
+            <label class="field">
+              <span>Timezone</span>
+              <input id="timezone" type="text" placeholder="e.g. Australia/Brisbane" />
+            </label>
+            <label class="field">
+              <span>Work window</span>
+              <input id="work_window" type="text" placeholder="e.g. Mon-Fri 9:00-17:00" />
+            </label>
+          </div>
+
+          <label class="field">
+            <span>This week's focus (top 3)</span>
+            <textarea id="focus_top3" rows="5" placeholder="- 1&#10;- 2&#10;- 3"></textarea>
+          </label>
+
+          <label class="field">
+            <span>Non-negotiables</span>
+            <textarea id="non_negotiables" rows="5" placeholder="Appointments, pickups, fixed commitments..."></textarea>
+          </label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Planning board</h2>
+            <p>Lay out project pressure and the draft weekly rhythm.</p>
+          </div>
+
+          <div class="tab-strip">
+            <button class="tab active" data-tab="projects">Projects</button>
+            <button class="tab" data-tab="timeline">Timeline</button>
+            <button class="tab" data-tab="risks">Risks</button>
+          </div>
+
+          <div class="tab-panel active" data-panel="projects">
+            <label class="field">
+              <span>Projects (with deadlines)</span>
+              <textarea id="projects" rows="10" placeholder="- Project A: deadline&#10;- Project B: deadline"></textarea>
+            </label>
+          </div>
+
+          <div class="tab-panel" data-panel="timeline">
+            <label class="field">
+              <span>Draft schedule notes</span>
+              <textarea id="draft_schedule_notes" rows="10" placeholder="09:00 | Deep work&#10;[Mon] Project review"></textarea>
+            </label>
+            <label class="field">
+              <span>Timeline preview</span>
+              <textarea id="timeline_preview" rows="8" readonly></textarea>
+            </label>
+          </div>
+
+          <div class="tab-panel" data-panel="risks">
+            <label class="field">
+              <span>Risks / conflicts</span>
+              <textarea id="risks_conflicts" rows="10" placeholder="What might derail the plan?"></textarea>
+            </label>
+          </div>
+        </section>
+
+        <aside class="panel side-panel">
+          <div class="panel-heading">
+            <h2>Handoff</h2>
+            <p>Keep the cross-module bridge clean and obvious.</p>
+          </div>
+
+          <label class="field">
+            <span>Artifacts</span>
+            <textarea id="artifacts" rows="4" placeholder="Chatty_Sandbox/schedule.md"></textarea>
+          </label>
+
+          <label class="field">
+            <span>Handoff summary</span>
+            <textarea id="handoff_preview" rows="12" readonly></textarea>
+          </label>
+
+          <button id="refresh-preview">Refresh preview</button>
+
+          <div class="note-card">
+            <strong>Cross-module tip</strong>
+            <p>
+              Open Meal Planner after this and copy your busy days or constraints across. Then ask
+              the main Chat tab to coordinate prep blocks with the schedule.
+            </p>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="./chattycog_bridge.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

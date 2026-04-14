@@ -1,0 +1,26 @@
+{
+  "module_id": "demo_work_schedule",
+  "summary": "0 project(s) and 0 timeline line(s) are currently tracked. Timezone is not set and work window is not set. Next handoff focus: draft the schedule timeline.",
+  "session_id": "",
+  "session_revision": 0,
+  "authoritative_device_id": "",
+  "authoritative_device_name": "",
+  "host_authoritative": false,
+  "payload": {
+    "fields": {
+      "artifacts": "",
+      "draft_schedule_notes": "",
+      "focus_top3": "",
+      "non_negotiables": "",
+      "projects": "",
+      "risks_conflicts": "",
+      "timezone": "",
+      "work_window": ""
+    },
+    "metrics": {
+      "projectCount": 0,
+      "timelineCount": 0
+    }
+  },
+  "updated_at_unix_ms": 1776210216320
+}

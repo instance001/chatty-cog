@@ -1,0 +1,7 @@
+{
+  "kind": "webview",
+  "auto_launch": true,
+  "title": "Meal Planner (Demo)",
+  "file": "web/index.html",
+  "notes": "Bundled living example of ChattyCog's hosted webview module path."
+}

@@ -1,0 +1,87 @@
+{
+  "network_device_id": "chattycog-desktop-2s8v68v-6912-1776210127564",
+  "network_recoverable_shared_chat_policy_json": null,
+  "orchestrator": {
+    "temp": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 256
+  },
+  "bookkeeper": {
+    "temp": 0.2,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 256
+  },
+  "network_device_name": "",
+  "network_allow_unknown_devices": true,
+  "network_allow_shared_lukewarm_context": true,
+  "network_trusted_devices": [],
+  "network_blocked_devices": [],
+  "network_device_aliases": {},
+  "network_device_groups": {},
+  "allow_sandbox_tool_requests": true,
+  "auto_generate_module_suspend_rundown": true,
+  "modules": {
+    "demo_work_schedule": {
+      "preferred_model": null,
+      "params": {
+        "temp": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_tokens": 256
+      },
+      "allow_receive_lukewarm_context": true
+    },
+    "demo_errand_coach": {
+      "preferred_model": null,
+      "params": {
+        "temp": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_tokens": 256
+      },
+      "allow_receive_lukewarm_context": true
+    },
+    "chattyfactory": {
+      "preferred_model": "Qwen2.5-Coder-32B-Instruct-abliterated-Q4_K_M.gguf",
+      "params": {
+        "temp": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_tokens": 256
+      },
+      "allow_receive_lukewarm_context": true
+    },
+    "llm_tweaker": {
+      "preferred_model": "Qwen2.5-Coder-32B-Instruct-abliterated-Q4_K_M.gguf",
+      "params": {
+        "temp": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_tokens": 256
+      },
+      "allow_receive_lukewarm_context": true
+    },
+    "demo_meal_planner": {
+      "preferred_model": null,
+      "params": {
+        "temp": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_tokens": 256
+      },
+      "allow_receive_lukewarm_context": true
+    },
+    "janet_school": {
+      "preferred_model": "Qwen2.5-Coder-32B-Instruct-abliterated-Q4_K_M.gguf",
+      "params": {
+        "temp": 0.3,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_tokens": 256
+      },
+      "allow_receive_lukewarm_context": true
+    }
+  }
+}

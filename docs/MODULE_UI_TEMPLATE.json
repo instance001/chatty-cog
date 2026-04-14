@@ -1,0 +1,267 @@
+{
+  "title": "Your Module Name",
+  "description": "One sentence: what this department/module does and what the user should do here.",
+  "sections": [
+    {
+      "id": "overview",
+      "title": "Overview",
+      "description": "The main inputs the user should fill in first.",
+      "blocks": [
+        {
+          "kind": "markdown",
+          "title": "How To Use This Module",
+          "text": "## Start here\n- Fill in the core goal\n- Set the status\n- Keep the next action current"
+        },
+        {
+          "kind": "callout",
+          "title": "Start Here",
+          "tone": "info",
+          "text": "Use this first card for the main task or intake area."
+        },
+        {
+          "kind": "tabs",
+          "id": "overview_tabs",
+          "title": "Overview Tabs",
+          "view_presets": [
+            { "label": "Goal View", "pane_ids": ["goal_tab"] },
+            { "label": "Action View", "pane_ids": ["next_action_tab", "task_list_tab"] }
+          ],
+          "tabs": [
+            {
+              "id": "goal_tab",
+              "title": "Goal",
+              "fields": ["goal"]
+            },
+            {
+              "id": "next_action_tab",
+              "title": "Next Action",
+              "fields": ["next_action"]
+            },
+            {
+              "id": "task_list_tab",
+              "title": "Task List",
+              "fields": ["task_list"]
+            }
+          ]
+        },
+        {
+          "kind": "checklist",
+          "title": "Checklist Preview",
+          "field": "task_list",
+          "empty": "Write checklist-style lines in Task List to preview them here."
+        },
+        {
+          "kind": "kanban",
+          "title": "Task Board",
+          "field": "task_list",
+          "lanes": ["To Do", "Doing", "Review", "Done"],
+          "max_rows": 12,
+          "filter_placeholder": "Find task, lane, or status...",
+          "filter_presets": [
+            { "label": "Blocked", "query": "blocked" },
+            { "label": "Doing", "query": "doing" },
+            { "label": "Done", "query": "done" }
+          ],
+          "empty": "Use [Lane] task or checklist-style lines in Task List to preview them here as a board."
+        }
+      ],
+      "fields": ["status"]
+    },
+    {
+      "id": "notes",
+      "title": "Notes & Context",
+      "description": "Useful supporting detail, references, risks, or working notes.",
+      "blocks": [
+        {
+          "kind": "stat",
+          "label": "Current Status",
+          "field": "status",
+          "empty": "No status selected yet."
+        },
+        {
+          "kind": "record",
+          "title": "Quick Summary",
+          "fields": ["status", "time_budget_min", "next_action"],
+          "empty": "Fill in a few fields to surface a quick summary here."
+        },
+        {
+          "kind": "actions",
+          "actions": ["save", "reload", "open_folder", "open_handshake"]
+        },
+        {
+          "kind": "progress",
+          "label": "Time Budget Used",
+          "field": "time_budget_min",
+          "min": 0,
+          "max": 480,
+          "empty": "No time budget set yet."
+        },
+        {
+          "kind": "file_list",
+          "title": "Recent Module Files",
+          "path": ".",
+          "max_entries": 6,
+          "filter_placeholder": "Find file or folder...",
+          "filter_presets": [
+            { "label": "Docs", "query": "md" },
+            { "label": "State", "query": "state" }
+          ],
+          "empty": "No files have been created in this module folder yet."
+        },
+        {
+          "kind": "artifact_preview",
+          "title": "Artifact Preview",
+          "field": "artifact_path",
+          "empty": "Point a field at a module-local file path to preview it here."
+        },
+        {
+          "kind": "table",
+          "title": "Structured Notes Table",
+          "field": "notes",
+          "has_header": true,
+          "max_rows": 6,
+          "empty": "If Notes contains CSV/TSV/pipe-style rows, they will preview here as a table."
+        },
+        {
+          "kind": "timeline",
+          "title": "Activity Timeline",
+          "field": "activity_log",
+          "max_rows": 8,
+          "empty": "Add dated or ordered lines in Activity Log to preview them here."
+        },
+        {
+          "kind": "dependency_graph",
+          "title": "Dependency Map",
+          "field": "dependency_map",
+          "max_rows": 10,
+          "filter_placeholder": "Find step or dependency...",
+          "filter_presets": [
+            { "label": "Review", "query": "review" },
+            { "label": "Handoff", "query": "handoff" }
+          ],
+          "empty": "Add lines like Intake -> Draft -> Review if you want the dependency flow to render here."
+        },
+        {
+          "kind": "inspector",
+          "id": "notes_inspector",
+          "title": "Context Inspector",
+          "view_presets": [
+            { "label": "Risk View", "pane_ids": ["support_panel"] },
+            { "label": "Notes View", "pane_ids": ["notes_panel"] }
+          ],
+          "panes": [
+            {
+              "id": "notes_panel",
+              "title": "Notes",
+              "summary_field": "notes",
+              "default_open": true,
+              "fields": ["notes"]
+            },
+            {
+              "id": "support_panel",
+              "title": "Supporting Context",
+              "summary_field": "risk_level",
+              "fields": ["risk_level", "time_budget_min", "artifact_path", "enabled", "activity_log", "dependency_map"]
+            }
+          ]
+        }
+      ],
+      "sidebar": true
+    }
+  ],
+  "fields": [
+    {
+      "id": "goal",
+      "label": "Goal",
+      "kind": "multiline",
+      "rows": 3,
+      "placeholder": "What are you trying to achieve in this module?",
+      "help": "Write the outcome in plain language so the user and orchestrator can both understand it.",
+      "section": "overview"
+    },
+    {
+      "id": "status",
+      "label": "Status",
+      "kind": "choice",
+      "options": ["not started", "in progress", "blocked", "done"],
+      "help": "Pick the option that best matches where this department is up to.",
+      "section": "overview"
+    },
+    {
+      "id": "notes",
+      "label": "Notes",
+      "kind": "multiline",
+      "rows": 8,
+      "placeholder": "Paste references, constraints, results, links, etc.",
+      "help": "This is the main scratch area for important details worth keeping with the module.",
+      "section": "notes"
+    },
+    {
+      "id": "task_list",
+      "label": "Task list",
+      "kind": "multiline",
+      "rows": 5,
+      "placeholder": "- [ ] First step\n[Doing] Draft handoff\n[x] Done item",
+      "help": "Use checklist-style lines or [Lane] task lines if you want the Checklist Preview and Task Board blocks to render them nicely.",
+      "section": "overview"
+    },
+    {
+      "id": "risk_level",
+      "label": "Risk level",
+      "kind": "choice",
+      "options": ["low", "medium", "high"],
+      "help": "Use this when another module or the orchestrator should treat the work carefully.",
+      "section": "notes"
+    },
+    {
+      "id": "time_budget_min",
+      "label": "Time budget (minutes)",
+      "kind": "number",
+      "min": 0,
+      "max": 480,
+      "help": "Optional, but useful for planning modules that need to coordinate with each other.",
+      "section": "notes"
+    },
+    {
+      "id": "enabled",
+      "label": "Enabled",
+      "kind": "bool",
+      "help": "Untick this if you want the module to stay available on disk but effectively inactive.",
+      "section": "notes"
+    },
+    {
+      "id": "artifact_path",
+      "label": "Artifact path",
+      "kind": "singleline",
+      "placeholder": "reports/summary.md",
+      "help": "Use a relative path inside the module folder if you want Artifact Preview to show it.",
+      "section": "notes"
+    },
+    {
+      "id": "activity_log",
+      "label": "Activity log",
+      "kind": "multiline",
+      "rows": 5,
+      "placeholder": "09:00 | Started research\n11:30 | Exported findings\n15:00 | Sent handoff",
+      "help": "Use timeline-style lines if you want the Activity Timeline block to render them nicely.",
+      "section": "notes"
+    },
+    {
+      "id": "dependency_map",
+      "label": "Dependency map",
+      "kind": "multiline",
+      "rows": 4,
+      "placeholder": "Intake -> Draft\nDraft -> Review\nReview -> Handoff",
+      "help": "Use simple A -> B lines if you want the Dependency Map block to render them as a staged graph.",
+      "section": "notes"
+    },
+    {
+      "id": "next_action",
+      "label": "Next action",
+      "kind": "singleline",
+      "placeholder": "One sentence: what you will do next.",
+      "help": "This is especially helpful for automatic suspend rundowns.",
+      "section": "overview"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "module_id": "demo_errand_coach",
+  "display_name": "Errand Coach (AI Demo)",
+  "icon": "checklist",
+  "description": "AI-powered demo department that turns a messy set of errands into an ordered plan with time estimates.",
+  "ai_enabled": true,
+  "default_model": "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+}

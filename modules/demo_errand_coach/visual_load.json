@@ -1,0 +1,7 @@
+{
+  "kind": "webview",
+  "auto_launch": true,
+  "title": "Errand Coach (AI Demo)",
+  "file": "web/index.html",
+  "notes": "Hosted webview intake board. The ChattyCog bridge still contains the module AI runner below."
+}
