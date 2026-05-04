@@ -15,6 +15,22 @@ fn llama_runtime_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+#[derive(Default)]
+struct RuntimeBackendState {
+    backend_inited: bool,
+    gpu_backends_loaded: bool,
+    cpu_backends_loaded: bool,
+    live_runtime_handles: usize,
+}
+
+fn llama_runtime_backend_state() -> MutexGuard<'static, RuntimeBackendState> {
+    static STATE: OnceLock<Mutex<RuntimeBackendState>> = OnceLock::new();
+    STATE
+        .get_or_init(|| Mutex::new(RuntimeBackendState::default()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 pub struct Llama {
     runtime_dir: PathBuf,
     _ggml: Library,
@@ -25,7 +41,6 @@ pub struct Llama {
     ggml_backend_load_all_from_path: Symbol<'static, unsafe extern "C" fn(*const c_char)>,
 
     llama_backend_init: Symbol<'static, unsafe extern "C" fn()>,
-    llama_backend_free: Symbol<'static, unsafe extern "C" fn()>,
     llama_print_system_info: Symbol<'static, unsafe extern "C" fn() -> *const c_char>,
 
     llama_model_default_params: Symbol<'static, unsafe extern "C" fn() -> llama_model_params>,
@@ -92,6 +107,7 @@ pub struct Llama {
     llama_batch_init: Symbol<'static, unsafe extern "C" fn(c_int, c_int, c_int) -> llama_batch>,
     llama_batch_free: Symbol<'static, unsafe extern "C" fn(llama_batch)>,
     llama_decode: Symbol<'static, unsafe extern "C" fn(*mut llama_context, llama_batch) -> c_int>,
+    llama_n_ctx: Symbol<'static, unsafe extern "C" fn(*const llama_context) -> u32>,
     llama_n_batch: Symbol<'static, unsafe extern "C" fn(*const llama_context) -> u32>,
 
     llama_set_embeddings: Symbol<'static, unsafe extern "C" fn(*mut llama_context, bool)>,
@@ -159,14 +175,13 @@ impl Llama {
             Ok(unsafe { std::mem::transmute::<Symbol<T>, Symbol<'static, T>>(s) })
         }
 
-        Ok(Self {
+        let llama = Self {
             runtime_dir,
             ggml_backend_load: unsafe { sym(&ggml, b"ggml_backend_load\0") }?,
             ggml_backend_load_all_from_path: unsafe {
                 sym(&ggml, b"ggml_backend_load_all_from_path\0")
             }?,
             llama_backend_init: unsafe { sym(&lib, b"llama_backend_init\0") }?,
-            llama_backend_free: unsafe { sym(&lib, b"llama_backend_free\0") }?,
             llama_print_system_info: unsafe { sym(&lib, b"llama_print_system_info\0") }?,
             llama_model_default_params: unsafe { sym(&lib, b"llama_model_default_params\0") }?,
             llama_context_default_params: unsafe { sym(&lib, b"llama_context_default_params\0") }?,
@@ -187,6 +202,7 @@ impl Llama {
             llama_batch_init: unsafe { sym(&lib, b"llama_batch_init\0") }?,
             llama_batch_free: unsafe { sym(&lib, b"llama_batch_free\0") }?,
             llama_decode: unsafe { sym(&lib, b"llama_decode\0") }?,
+            llama_n_ctx: unsafe { sym(&lib, b"llama_n_ctx\0") }?,
             llama_n_batch: unsafe { sym(&lib, b"llama_n_batch\0") }?,
             llama_set_embeddings: unsafe { sym(&lib, b"llama_set_embeddings\0") }?,
             llama_get_embeddings: unsafe { sym(&lib, b"llama_get_embeddings\0") }?,
@@ -202,7 +218,14 @@ impl Llama {
             llama_sampler_accept: unsafe { sym(&lib, b"llama_sampler_accept\0") }?,
             _ggml: ggml,
             _lib: lib,
-        })
+        };
+
+        {
+            let mut state = llama_runtime_backend_state();
+            state.live_runtime_handles = state.live_runtime_handles.saturating_add(1);
+        }
+
+        Ok(llama)
     }
 
     pub fn system_info(&self) -> String {
@@ -251,6 +274,28 @@ impl Llama {
         Ok(())
     }
 
+    fn ensure_backend_runtime(&self, needs_gpu_backends: bool) -> Result<()> {
+        let mut state = llama_runtime_backend_state();
+
+        if !state.backend_inited {
+            unsafe { (self.llama_backend_init)() };
+            state.backend_inited = true;
+        }
+
+        if needs_gpu_backends {
+            if !state.gpu_backends_loaded {
+                self.load_backends_gpu_allowed()?;
+                state.gpu_backends_loaded = true;
+                state.cpu_backends_loaded = true;
+            }
+        } else if !state.cpu_backends_loaded {
+            self.load_backends_cpu_only()?;
+            state.cpu_backends_loaded = true;
+        }
+
+        Ok(())
+    }
+
     pub fn generate_chat(
         &self,
         model_path: &Path,
@@ -269,7 +314,7 @@ impl Llama {
 
         // Try GPU/Vulkan first, then a safer partial-offload, then fall back to CPU-only.
         // This keeps the app usable when Vulkan runs out of device memory.
-        const SAFE_GPU_LAYERS: i32 = 32;
+        const SAFE_GPU_LAYERS: i32 = 16;
 
         let mut try_gpu_all = || {
             self.generate_chat_with_backend(
@@ -297,7 +342,7 @@ impl Llama {
                     BackendMode::GpuAllowed {
                         n_gpu_layers: SAFE_GPU_LAYERS,
                     },
-                    ContextProfile::Default,
+                    ContextProfile::Safe,
                     model_path,
                     system,
                     user,
@@ -390,21 +435,7 @@ impl Llama {
         cancel: &std::sync::atomic::AtomicBool,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<()> {
-        unsafe { (self.llama_backend_init)() };
-
-        struct BackendFreeGuard<'a>(&'a Llama);
-        impl Drop for BackendFreeGuard<'_> {
-            fn drop(&mut self) {
-                unsafe { (self.0.llama_backend_free)() };
-            }
-        }
-        let _guard = BackendFreeGuard(self);
-
-        // Load backends *after* backend init (llama.cpp backend init is process-global).
-        match backend {
-            BackendMode::GpuAllowed { .. } => self.load_backends_gpu_allowed()?,
-            BackendMode::CpuOnly => self.load_backends_cpu_only()?,
-        }
+        self.ensure_backend_runtime(matches!(backend, BackendMode::GpuAllowed { .. }))?;
 
         let n_gpu_layers = match backend {
             BackendMode::GpuAllowed { n_gpu_layers } => n_gpu_layers,
@@ -441,7 +472,9 @@ impl Llama {
         }
 
         let prompt = self.build_prompt(model, system, user)?;
-        let prompt_tokens = self.tokenize(vocab, &prompt, true)?;
+        let mut prompt_tokens = self.tokenize(vocab, &prompt, true)?;
+        let effective_max_tokens =
+            self.fit_prompt_tokens_to_context(ctx, &mut prompt_tokens, max_tokens, on_token)?;
 
         let mut n_past: llama_pos = 0;
         self.eval_chunked(ctx, &prompt_tokens, n_past, 512)?;
@@ -464,7 +497,7 @@ impl Llama {
 
         // Generate tokens one by one.
         // Sample from the logits of the last token in the last decoded batch (llama.h recommends idx = -1).
-        for _ in 0..max_tokens {
+        for _ in 0..effective_max_tokens {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
@@ -489,17 +522,7 @@ impl Llama {
 
     pub fn embed_text_cpu_only(&self, model_path: &Path, text: &str) -> Result<Vec<f32>> {
         let _lock = llama_runtime_lock();
-        unsafe { (self.llama_backend_init)() };
-        struct BackendFreeGuard<'a>(&'a Llama);
-        impl Drop for BackendFreeGuard<'_> {
-            fn drop(&mut self) {
-                unsafe { (self.0.llama_backend_free)() };
-            }
-        }
-        let _guard = BackendFreeGuard(self);
-
-        // Load CPU backend *after* backend init (llama.cpp backend init is process-global).
-        self.load_backends_cpu_only()?;
+        self.ensure_backend_runtime(false)?;
 
         let mut mparams = unsafe { (self.llama_model_default_params)() };
         mparams.n_gpu_layers = 0;
@@ -605,17 +628,7 @@ impl Llama {
         mut on_token: impl FnMut(&str),
     ) -> Result<()> {
         let _lock = llama_runtime_lock();
-        unsafe { (self.llama_backend_init)() };
-        struct BackendFreeGuard<'a>(&'a Llama);
-        impl Drop for BackendFreeGuard<'_> {
-            fn drop(&mut self) {
-                unsafe { (self.0.llama_backend_free)() };
-            }
-        }
-        let _guard = BackendFreeGuard(self);
-
-        // Load CPU backend *after* backend init (llama.cpp backend init is process-global).
-        self.load_backends_cpu_only()?;
+        self.ensure_backend_runtime(false)?;
 
         let mut mparams = unsafe { (self.llama_model_default_params)() };
         mparams.n_gpu_layers = 0;
@@ -742,7 +755,9 @@ impl Llama {
         cancel: &AtomicBool,
     ) -> Result<*mut llama_context> {
         let mut params = unsafe { (self.llama_context_default_params)() };
-        // Conservative defaults; can be surfaced in Settings later.
+        // Conservative defaults; can be surfaced in Settings later. llama.cpp currently
+        // defaults to 512 here, which is too small once the GUI injects memory/sandbox
+        // context, so choose the app's desired chat context explicitly.
         let desired_ctx: u32 = match profile {
             ContextProfile::Default => 4096,
             ContextProfile::Safe => 2048,
@@ -752,17 +767,8 @@ impl Llama {
             ContextProfile::Safe => 256,
         };
 
-        if params.n_ctx == 0 {
-            params.n_ctx = desired_ctx;
-        } else if matches!(profile, ContextProfile::Safe) {
-            params.n_ctx = params.n_ctx.min(desired_ctx);
-        }
-
-        if params.n_batch == 0 {
-            params.n_batch = desired_batch;
-        } else if matches!(profile, ContextProfile::Safe) {
-            params.n_batch = params.n_batch.min(desired_batch);
-        }
+        params.n_ctx = desired_ctx;
+        params.n_batch = desired_batch;
 
         if params.n_ubatch == 0 {
             params.n_ubatch = params.n_batch;
@@ -1026,6 +1032,40 @@ impl Llama {
         Ok(())
     }
 
+    fn fit_prompt_tokens_to_context(
+        &self,
+        ctx: *const llama_context,
+        prompt_tokens: &mut Vec<llama_token>,
+        max_tokens: usize,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<usize> {
+        let n_ctx = unsafe { (self.llama_n_ctx)(ctx) } as usize;
+        if n_ctx == 0 {
+            return Ok(max_tokens);
+        }
+
+        let generation_reserve = max_tokens.min(n_ctx.saturating_sub(1)).max(1);
+        let usable_prompt_tokens = n_ctx.saturating_sub(generation_reserve).max(1);
+        if prompt_tokens.len() <= usable_prompt_tokens {
+            let available_generation_tokens = n_ctx.saturating_sub(prompt_tokens.len()).max(1);
+            return Ok(max_tokens.min(available_generation_tokens));
+        }
+
+        let dropped = prompt_tokens.len() - usable_prompt_tokens;
+        prompt_tokens.drain(..dropped);
+        on_token(&format!(
+            "\n\n[Runtime] Prompt context was too large for this run; trimmed {dropped} oldest prompt tokens before generation.\n\n"
+        ));
+        let available_generation_tokens = n_ctx.saturating_sub(prompt_tokens.len()).max(1);
+        let effective_max_tokens = max_tokens.min(available_generation_tokens);
+        if effective_max_tokens < max_tokens {
+            on_token(&format!(
+                "\n\n[Runtime] Output capped at {effective_max_tokens} tokens for this context window.\n\n"
+            ));
+        }
+        Ok(effective_max_tokens)
+    }
+
     fn create_sampler(&self, temp: f32, top_p: f32, top_k: i32) -> Result<*mut llama_sampler> {
         let params = unsafe { (self.llama_sampler_chain_default_params)() };
         let chain = unsafe { (self.llama_sampler_chain_init)(params) };
@@ -1050,6 +1090,18 @@ impl Llama {
             }
         }
         Ok(chain)
+    }
+}
+
+impl Drop for Llama {
+    fn drop(&mut self) {
+        let mut state = llama_runtime_backend_state();
+        state.live_runtime_handles = state.live_runtime_handles.saturating_sub(1);
+        if state.live_runtime_handles == 0 {
+            state.gpu_backends_loaded = false;
+            state.cpu_backends_loaded = false;
+            state.backend_inited = false;
+        }
     }
 }
 

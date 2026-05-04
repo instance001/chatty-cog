@@ -7,10 +7,18 @@
 - `chattycog_gui/src/main.rs`
   - Tabbed UI shell (Chat / Preferences / Logs / Sandbox / Settings / About + Modules)
   - Orchestrator chat loop with streaming tokens
-  - Hot memory sidebar (user-visible recent/pinned items)
+  - Runtime status badge in Chat so the user can see whether the local model is on a GPU/Vulkan path, CPU path, or error path
+  - Chat-header GGUF selector with live model switching, quick-open, refresh, voice status, and live chat token readout
+  - Collapsible assistant reasoning view in each assistant bubble plus inline interrupt control in the chat composer
+  - Wait-state guard in the composer so extra user turns cannot be injected while inference is already running
+  - Three-column chat layout with Hot Memory, transcript, and Luke Warm side-by-side
+  - Heuristic cleanup for leaked / repeated reasoning so obvious draft loops get siphoned out of visible replies and duplicate streamed suffixes are trimmed
+  - Capsule library for reusable personality / behavior injections, stored in preferences and optionally layered into the orchestrator system prompt
+  - Hot memory panel (user-visible recent/pinned items)
   - Logs UI (semantic search + keyword search + log folder explorer)
   - Sandbox explorer/editor (`Chatty_Sandbox/`)
   - Orchestrator sandbox tool requests (user-approved write/append/read/list/preload/ledger within `Chatty_Sandbox/`)
+  - Explicit composer-level sandbox task mode (`Create file` / `Edit file` + target path) that wraps the current user turn in deterministic sandbox instructions before generation
   - Persistent sandbox scratchpad (`Chatty_Sandbox/scratchpad/current.md`) injected back into the prompt as durable working notes
   - Structured task ledger (`Chatty_Sandbox/scratchpad/task_ledger.md`) injected back into the prompt for current task / next step / open questions / files touched
   - Multi-step prompt detection that nudges the orchestrator toward sandbox preload + ledger use when a task looks long or structured
@@ -27,6 +35,8 @@
 - `chattycog_gui/src/llama_dyn.rs`
   - Loads `runtime/windows/llama.dll` and `runtime/windows/ggml.dll` dynamically
   - Loads ggml backends from a folder (`ggml_backend_load_all_from_path`)
+  - Initializes llama / ggml backend loading once per process so repeated turns do not keep registering backends until the scheduler assert trips
+  - Tracks live runtime handles so backend state is reset safely when the last runtime instance drops
   - Runs:
     - GPU-allowed chat generation (`generate_chat`)
     - CPU-only generation (`generate_text_cpu_only`)
@@ -79,6 +89,8 @@ Before each generation, the Chat tab reads:
 - `memory/lukewarm.txt` (recent activity rollup)
 
 and injects them into the orchestrator system prompt.
+
+If the user has activated a capsule from Preferences, that capsule is also layered into the orchestrator system prompt as an explicit style/persona overlay.
 
 ## Packaging direction
 

@@ -17,7 +17,7 @@ impl Default for GenParams {
             temp: 0.7,
             top_p: 0.9,
             top_k: 40,
-            max_tokens: 256,
+            max_tokens: 1024,
         }
     }
 }
@@ -40,11 +40,19 @@ impl Default for ModulePreferences {
                 temp: 0.3,
                 top_p: 0.9,
                 top_k: 40,
-                max_tokens: 256,
+                max_tokens: 1024,
             },
             allow_receive_lukewarm_context: true,
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct PromptCapsule {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -53,6 +61,8 @@ pub struct AppPreferences {
     pub network_device_id: String,
     #[serde(default)]
     pub network_recoverable_shared_chat_policy_json: Option<String>,
+    #[serde(default)]
+    pub active_orchestrator_capsule: Option<String>,
     #[serde(default)]
     pub orchestrator: GenParams,
     #[serde(default)]
@@ -76,6 +86,8 @@ pub struct AppPreferences {
     #[serde(default = "default_true")]
     pub auto_generate_module_suspend_rundown: bool,
     #[serde(default)]
+    pub orchestrator_capsules: Vec<PromptCapsule>,
+    #[serde(default)]
     pub modules: HashMap<String, ModulePreferences>, // module_id -> prefs
 }
 
@@ -92,6 +104,7 @@ impl Default for AppPreferences {
         Self {
             network_device_id: String::new(),
             network_recoverable_shared_chat_policy_json: None,
+            active_orchestrator_capsule: None,
             orchestrator: GenParams::default(),
             bookkeeper: GenParams {
                 temp: 0.2,
@@ -108,6 +121,7 @@ impl Default for AppPreferences {
             network_device_groups: HashMap::new(),
             allow_sandbox_tool_requests: true,
             auto_generate_module_suspend_rundown: true,
+            orchestrator_capsules: Vec::new(),
             modules: HashMap::new(),
         }
     }
@@ -130,9 +144,22 @@ pub fn load_prefs(path: &Path) -> Result<AppPreferences> {
     let mut prefs: AppPreferences =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
     // Ensure new fields are always present with sane defaults.
+    if prefs.orchestrator.max_tokens <= 0 {
+        prefs.orchestrator.max_tokens = 1024;
+    } else if prefs.orchestrator.max_tokens == 256
+        && (prefs.orchestrator.temp - 0.7).abs() < f32::EPSILON
+        && (prefs.orchestrator.top_p - 0.9).abs() < f32::EPSILON
+        && prefs.orchestrator.top_k == 40
+    {
+        // Migrate the legacy chat default so older installs don't keep truncating replies.
+        prefs.orchestrator.max_tokens = 1024;
+    }
     if prefs.bookkeeper.max_tokens <= 0 {
         prefs.bookkeeper.max_tokens = 256;
     }
+    prefs.orchestrator_capsules.retain(|capsule| {
+        !capsule.name.trim().is_empty() && !capsule.text.trim().is_empty()
+    });
     Ok(prefs)
 }
 

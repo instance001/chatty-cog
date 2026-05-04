@@ -6,6 +6,23 @@ This project is pre-release and changes may be breaking.
 
 ## Unreleased
 
+- Chat UI refresh:
+  - three-column chat layout (`Hot Memory` / transcript / `Luke Warm`)
+  - chat-header GGUF selector, quick-open, refresh, active voice preview, and live `Chat max tokens` readout
+  - multiline composer with explicit `Please wait` guard while a reply is still generating
+  - inline `Interrupt` control in the composer
+- Chat reasoning polish:
+  - collapsible assistant thinking panel
+  - stronger prompt rules against repeated self-correction loops
+  - heuristic cleanup that siphons obvious meta-reasoning out of visible replies
+  - stream-time trimming of exact repeated draft suffixes
+- Preferences / personality:
+  - Preferences tab now houses reusable capsule-style personality / behavior injections
+  - users can save multiple capsules, activate one, or fall back to native ChattyCog voice
+  - orchestrator chat settings now apply live from Preferences instead of requiring a separate hidden runtime sync step
+  - legacy untouched `256` orchestrator max-token defaults migrate forward to `1024` on load
+- Runtime hardening:
+  - one-time backend init now tracks live runtime handles so stale backend flags do not survive after the last runtime instance drops
 - Rust GUI scaffold (eframe/egui) with old-school tabbed UI.
 - Option B llama.cpp integration (dynamic `llama.dll` + ggml backends).
 - Runtime hardening: serialize llama.cpp backend init/free across threads to reduce `llama_decode failed` from concurrent chat/bookkeeper/module work.

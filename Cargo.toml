@@ -17,6 +17,7 @@ tao = "0.35"
 url = "2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_System_Performance",
     "Win32_UI_WindowsAndMessaging",
 ] }
 wry = "0.55"

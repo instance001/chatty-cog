@@ -50,7 +50,7 @@ Inside `chattycog_gui/`:
 - `module_templates/`
   - Copy-safe starter modules you can duplicate into `modules/`.
 - `Chatty_Sandbox/`
-  - A safe scratch folder you can drop files into and open from the app.
+  - A safe scratch folder you can drop files into and open from the app. Sandbox file creation is scoped to .txt and .md only. Executables and code files cannot be created through the sandbox.
 
 ## Build and run
 
@@ -66,23 +66,43 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 ### Chat tab
 
 1) Select a model
-- Use the left sidebar "Model file" dropdown or "Pick GGUF..." to select a `.gguf`.
+- Use the Chat header `Model` dropdown, `Open GGUF...`, or `Refresh models`.
+- The active model path also appears in the app header as `GGUF: ...`.
 
 2) Confirm runtime is loaded
 - The top of the chat shows a "Runtime:" status line.
+- ChattyCog may show a GPU/Vulkan path even when a small number of tensors still stay on CPU. That is still a real GPU-assisted run, not a full CPU fallback.
+- The Chat header also shows the live `Chat max tokens` value for the next orchestrator reply.
 
 3) Type a message
 - Use the input box at the bottom and press Enter or click Send.
+- The composer is multiline: `Enter` sends, `Shift+Enter` adds a new line.
 - If a module tab is active, the orchestrator is paused and the Chat input will be disabled.
+- If ChattyCog is already generating a reply, the composer switches into a `Please wait` state until the current inference finishes or you press `Interrupt`.
+- Use `Interrupt` in the chat composer if you want to stop the current reply.
+- If the assistant includes a reasoning trace, use the `Show thinking` / `Hide thinking` disclosure row inside the assistant bubble to expand or collapse it without losing the visible answer.
 
 4) Adjust generation
-- In the left sidebar, use "Orchestrator Params":
+- Open the `Preferences` tab and use `Orchestrator (Chat)`:
   - Presets: Precise / Balanced / Creative
   - Sliders: temperature, top_p, top_k, max_tokens
+- These orchestrator sliders now apply to live chat immediately, so the next reply uses the new values without a separate hidden apply step.
+- `Save` writes the current defaults into `config/preferences.json`.
 
-5) Sandbox tool requests (optional)
+5) Optional voice / personality capsules
+- Open the `Preferences` tab and use the `Capsule Library` on the right.
+- You can:
+  - save a named personality / behavior capsule
+  - activate it for the current chat style
+  - deactivate it and return to native ChattyCog voice
+- The top of the Chat tab shows the active voice state:
+  - `Voice: native ChattyCog`
+  - or the active capsule name plus a short preview
+
+6) Sandbox tool requests (optional)
 - The orchestrator cannot directly read/write your files.
 - If it needs to read/write within `Chatty_Sandbox/`, it can request sandbox actions like `write`, `append`, `read`, `list`, `preload`, or `ledger`.
+- Chatty-cog sandbox is limited to .txt and .md files.
 - The Chat UI will show a "Pending sandbox actions" panel with `Seed ledger from current prompt`, `Defer actions`, `Preload + Continue`, `Approve`, `Approve + Continue`, and `Reject`.
 - Only approved actions execute, and they are restricted to `Chatty_Sandbox/`.
 - This feature can be enabled/disabled in the Preferences tab.
@@ -98,6 +118,12 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 Tips for using this in plain language:
 - You can ask in normal English, e.g. "Create a file `notes/todo.md` in the sandbox and write my task list in it."
 - If the model doesn't trigger a sandbox request, add: "Use the sandbox tool to do it."
+- For the most reliable file workflow, use the `Sandbox task` checkbox in the chat composer:
+  - turn it on
+  - choose `Create file` or `Edit file`
+  - enter the target path, such as `notes/todo.md`
+  - type the actual content request in plain language
+- In sandbox task mode, ChattyCog explicitly tells the model this turn is a sandbox file job so it wastes fewer tokens trying to infer whether you meant normal conversation or file work.
 - For durable working notes, say things like:
   - "Append this plan to the sandbox scratchpad."
   - "Read the scratchpad and continue from it."
@@ -130,6 +156,8 @@ Tips for using this in plain language:
 - The sandbox is locked:
   - actions are restricted to `Chatty_Sandbox/`
   - path traversal (like `..`) is blocked
+  - AI-requested sandbox file actions are limited to `.txt`, `.md`, and `.markdown`
+  - approved sandbox actions now reopen the touched file and focus the Sandbox tab automatically
 
 ### Modules (departments)
 
@@ -228,6 +256,10 @@ The Preferences tab stores and applies defaults across ChattyCog and modules.
   - Preferred model filename (GGUF)
   - Default generation params
   - Allow receiving Luke Warm context (reserved for future module runners)
+- Capsule library:
+  - saved named personality / behavior injections
+  - active capsule selection
+  - editor for creating, updating, or deleting capsules
 
 ### Networking tab
 
@@ -408,6 +440,14 @@ Checklist:
 Safety note:
 - Treat any "I created the file" claim as untrusted until you see the pending approval + a successful sandbox status line.
 
+### Chat replies still stop too early
+
+Checklist:
+- Look at the Chat header and confirm `Chat max tokens` is not still low.
+- Open `Preferences -> Orchestrator (Chat)` and confirm `max_tokens` is where you expect it.
+- Save preferences if you want the higher value to persist into the next launch.
+- If the reply is extremely repetitive, interrupt it and retry after simplifying the active capsule or prompt.
+
 ### Module debriefs are not appearing in Chat
 
 Checklist:
@@ -452,4 +492,3 @@ cargo run --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 ChattyCog is designed to run locally.
 Internet access is not required for inference and can be blocked at the OS firewall level if desired.
 Optional local peer networking is LAN-only, off by default, and only used when you deliberately enable it.
-

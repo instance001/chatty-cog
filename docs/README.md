@@ -36,7 +36,16 @@ cargo run --manifest-path chattycog_gui/Cargo.toml --bin smoke_llama
 ## What you get
 
 - **Chat tab**: talk to a selected GGUF model (streaming tokens).
-- **Hot memory (sidebar)**: small, user-visible "working set" of recent/pinned items.
+- **Chat runtime visibility**:
+  - runtime status shows whether ChattyCog is on a GPU/Vulkan path, CPU path, or error path
+  - the chat header now includes a GGUF selector, `Open GGUF...`, `Refresh models`, and a live `Chat max tokens` readout
+  - the chat composer enters a `Please wait` state while a reply is still generating, so rapid-fire extra turns do not get injected into the same inference run
+  - assistant reasoning can be expanded/collapsed in-place from a dedicated disclosure row
+  - inline `Interrupt` button lets you stop the current reply without leaving the composer
+- **Chat layout**:
+  - three-column chat workspace with `Hot Memory` on the left, the main transcript in the center, and `Luke Warm` memory on the right
+  - multiline composer (`Enter` sends, `Shift+Enter` adds a new line)
+- **Hot memory**: small, user-visible "working set" of recent/pinned items.
 - **Logs tab**:
   - CPU-only **bookkeeper** that records events/messages to disk (`cold_log.jsonl`)
   - semantic search (Option B, embeddings) + keyword search fallback (Option A)
@@ -44,6 +53,13 @@ cargo run --manifest-path chattycog_gui/Cargo.toml --bin smoke_llama
   - semantic search filters by `module_id` (department) and/or `tag`
   - append ad-hoc events with `module_id` + `tags` + optional `payload_json`
 - **Sandbox tab**: browse/edit/save files inside `Chatty_Sandbox/`.
+- **Sandbox task mode**:
+  - the chat composer can explicitly mark a turn as a sandbox file task
+  - choose `Create file` or `Edit file`, set a target `.md` / `.txt` path, and ChattyCog will steer the model toward deterministic sandbox JSON instead of making it infer intent from freeform wording
+  - approved sandbox actions automatically open the touched file and focus the Sandbox tab
+- **Capsule library**:
+  - the Preferences tab includes a reusable capsule library for saved personality / behavior injections
+  - users can save multiple named capsules, activate one for the current task, or fall back to native ChattyCog voice
 - **Networking tab**:
   - discover nearby ChattyCog instances on the same trusted local network
   - connect/disconnect peers
@@ -59,6 +75,9 @@ cargo run --manifest-path chattycog_gui/Cargo.toml --bin smoke_llama
 
 ## Troubleshooting
 
+- If chat replies still feel cut off too early:
+  - confirm the chat header `Chat max tokens` value is what you expect
+  - the Preferences tab now updates live chat settings immediately, and the next Save will persist them to `config/preferences.json`
 - If the app can't load the runtime, check:
   - `chattycog_gui/runtime/windows/llama.dll` exists
   - `chattycog_gui/runtime/windows/ggml.dll` exists

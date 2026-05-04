@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, path::Path};
 
 use anyhow::Context;
+mod ecg_window;
 use chattycog_gui::llama_dyn;
 use chattycog_gui::memory::bookkeeper::{
     BookkeeperConfig, BookkeeperHandle, EventCategory, MemoryEvent, MemoryHit, MemoryKind,
@@ -31,8 +32,9 @@ use chattycog_gui::module_registry::{
     ModuleManifest, ModuleNetworkAssetLane, ModuleNetworkFeature, ModuleRegistry,
 };
 use chattycog_gui::networking::{BlockedPeer, NetworkController, ReceivedArtifact, TrustedPeer};
-use chattycog_gui::preferences::{self, AppPreferences, GenParams, ModulePreferences};
+use chattycog_gui::preferences::{self, AppPreferences, GenParams, ModulePreferences, PromptCapsule};
 use crossbeam_channel::Receiver;
+use ecg_window::EcgWindowState;
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -85,11 +87,36 @@ enum Role {
     Assistant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxTaskIntent {
+    Create,
+    Edit,
+}
+
+impl SandboxTaskIntent {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Create",
+            Self::Edit => "Edit",
+        }
+    }
+
+    fn summary_verb(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Edit => "edit",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Message {
     role: Role,
     content: String,
+    thinking: Option<String>,
 }
+
+const MAX_LIVE_CHAT_MESSAGES: usize = 48;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ReceivedWorkflowStateRecord {
@@ -584,7 +611,7 @@ impl Default for ModuleAiState {
             temp: 0.3,
             top_p: 0.9,
             top_k: 40,
-            max_tokens: 256,
+            max_tokens: 1024,
             user_input: String::new(),
             output: String::new(),
             is_running: false,
@@ -1231,6 +1258,7 @@ struct ChattyCogApp {
 
     // UI
     scroll_to_bottom: bool,
+    ecg_window: EcgWindowState,
 
     // Orchestrator "hot memory" (small, always-visible working set)
     hot_memory: Vec<String>,
@@ -1246,6 +1274,9 @@ struct ChattyCogApp {
     prefs_path: PathBuf,
     prefs: AppPreferences,
     prefs_status: String,
+    capsule_editor_name: String,
+    capsule_editor_text: String,
+    capsule_selected_name: Option<String>,
 
     // Orchestrator sandbox
     sandbox_dir: Option<PathBuf>,
@@ -1256,6 +1287,9 @@ struct ChattyCogApp {
     sandbox_status: String,
     sandbox_last_tool_result: String,
     sandbox_task_nudge: String,
+    sandbox_task_enabled: bool,
+    sandbox_task_intent: SandboxTaskIntent,
+    sandbox_task_path: String,
 
     // Modules
     modules_dir: Option<PathBuf>,
@@ -1362,7 +1396,8 @@ impl ChattyCogApp {
             models_cache: Vec::new(),
             messages: vec![Message {
                 role: Role::System,
-                content: "You are ChattyCog. Respond concisely and helpfully.".to_string(),
+                content: default_orchestrator_system_prompt(),
+                thinking: None,
             }],
             composer: String::new(),
             is_generating: false,
@@ -1396,15 +1431,19 @@ impl ChattyCogApp {
             lukewarm_poll_due: Some(Instant::now()),
             lukewarm_rx: None,
             scroll_to_bottom: true,
+            ecg_window: EcgWindowState::new("ECG Window - System hardware activity"),
             hot_memory: Vec::new(),
             orch_temp: 0.7,
             orch_top_p: 0.9,
             orch_top_k: 40,
-            orch_max_tokens: 256,
+            orch_max_tokens: 1024,
             orch_freeze_pending: false,
             prefs_path,
             prefs,
             prefs_status,
+            capsule_editor_name: String::new(),
+            capsule_editor_text: String::new(),
+            capsule_selected_name: None,
             sandbox_dir: find_or_create_sandbox_dir(),
             sandbox_selected: None,
             sandbox_editor_path: None,
@@ -1413,6 +1452,9 @@ impl ChattyCogApp {
             sandbox_status: String::new(),
             sandbox_last_tool_result: String::new(),
             sandbox_task_nudge: String::new(),
+            sandbox_task_enabled: false,
+            sandbox_task_intent: SandboxTaskIntent::Create,
+            sandbox_task_path: "notes/".to_string(),
             modules_dir: find_modules_dir(),
             module_registry: ModuleRegistry::scan(find_modules_dir()),
             module_state_notes: HashMap::new(),
@@ -1472,6 +1514,7 @@ impl ChattyCogApp {
         };
 
         app.apply_prefs_to_runtime_settings();
+        app.sync_capsule_selection_from_prefs();
         app.ensure_persisted_network_identity();
 
         if !app.prefs.network_device_name.trim().is_empty() {
@@ -1518,6 +1561,48 @@ impl ChattyCogApp {
         app
     }
 
+    fn sync_capsule_selection_from_prefs(&mut self) {
+        let active_name = self
+            .prefs
+            .active_orchestrator_capsule
+            .as_ref()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        self.capsule_selected_name = active_name.clone();
+
+        if let Some(active_name) = active_name {
+            if let Some(capsule) = self
+                .prefs
+                .orchestrator_capsules
+                .iter()
+                .find(|capsule| capsule.name == active_name)
+            {
+                self.capsule_editor_name = capsule.name.clone();
+                self.capsule_editor_text = capsule.text.clone();
+                return;
+            }
+        }
+
+        if self.capsule_editor_name.trim().is_empty() && self.capsule_editor_text.trim().is_empty() {
+            if let Some(first) = self.prefs.orchestrator_capsules.first() {
+                self.capsule_editor_name = first.name.clone();
+                self.capsule_editor_text = first.text.clone();
+                self.capsule_selected_name = Some(first.name.clone());
+            }
+        }
+    }
+
+    fn active_orchestrator_capsule(&self) -> Option<&PromptCapsule> {
+        let active_name = self.prefs.active_orchestrator_capsule.as_deref()?.trim();
+        if active_name.is_empty() {
+            return None;
+        }
+        self.prefs
+            .orchestrator_capsules
+            .iter()
+            .find(|capsule| capsule.name == active_name)
+    }
+
     fn ensure_persisted_network_identity(&mut self) {
         let current_device_id = self.networking.snapshot().device_id.trim().to_string();
         if current_device_id.is_empty() || self.prefs.network_device_id.trim() == current_device_id
@@ -1545,6 +1630,40 @@ impl ChattyCogApp {
         self.bookkeeper_top_p = self.prefs.bookkeeper.top_p;
         self.bookkeeper_top_k = self.prefs.bookkeeper.top_k;
         self.bookkeeper_max_tokens = self.prefs.bookkeeper.max_tokens;
+    }
+
+    fn apply_live_orchestrator_prefs(&mut self) {
+        self.orch_temp = self.prefs.orchestrator.temp;
+        self.orch_top_p = self.prefs.orchestrator.top_p;
+        self.orch_top_k = self.prefs.orchestrator.top_k;
+        self.orch_max_tokens = self.prefs.orchestrator.max_tokens;
+    }
+
+    fn set_active_chat_model_path(&mut self, path: Option<PathBuf>) {
+        self.gguf_path = path.clone();
+        if let Some(selected) = path {
+            let label = selected
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| selected.display().to_string());
+            self.runtime_status = format!("Runtime: selected model {label}");
+            if let Some(bk) = &self.bookkeeper {
+                bk.append(MemoryEvent {
+                    ts_unix_ms: now_unix_ms(),
+                    kind: MemoryKind::Cold,
+                    category: EventCategory::Module,
+                    source: "ui".to_string(),
+                    module: Some("models".to_string()),
+                    event_type: Some("select".to_string()),
+                    text: format!("Selected model: {}", selected.display()),
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    payload_json: None,
+                });
+            }
+        } else {
+            self.runtime_status = "Runtime: no GGUF selected".to_string();
+        }
     }
 
     fn persist_network_prefs(&mut self) {
@@ -6116,6 +6235,7 @@ impl ChattyCogApp {
                     Message {
                         role: Role::System,
                         content: bundle.system_prompt.clone(),
+                        thinking: None,
                     },
                 );
             }
@@ -6780,6 +6900,7 @@ impl ChattyCogApp {
             self.runtime_status = "Runtime: orchestrator paused (module active)".to_string();
             return;
         }
+        self.pulse_ecg(88.0, "Generating a chat response with the local model.");
 
         let (tx, rx) = crossbeam_channel::unbounded::<GenEvent>();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -6790,12 +6911,23 @@ impl ChattyCogApp {
         let orch_top_k = self.orch_top_k;
         let orch_max_tokens = self.orch_max_tokens;
         let runtime_dir = find_runtime_windows_dir();
-        let base_system = self
+        let mut base_system = self
             .messages
             .iter()
             .find(|m| m.role == Role::System)
             .map(|m| m.content.clone())
-            .unwrap_or_else(|| "You are ChattyCog.".to_string());
+            .unwrap_or_else(default_orchestrator_system_prompt);
+        if base_system.trim() == "You are ChattyCog. Respond concisely and helpfully." {
+            base_system = default_orchestrator_system_prompt();
+        }
+        if let Some(capsule) = self.active_orchestrator_capsule() {
+            base_system.push_str("\n\n### ACTIVE CAPSULE\n");
+            base_system.push_str(
+                "The user explicitly selected this reusable behavior/personality capsule for the current task. Follow it as a style and persona layer unless the current request clearly needs otherwise.\n",
+            );
+            base_system.push_str(&capsule.text);
+            base_system.push('\n');
+        }
 
         let mut departments_context =
             read_departments_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
@@ -6807,26 +6939,43 @@ impl ChattyCogApp {
         }
         let lukewarm_context =
             read_lukewarm_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
+        let model_label = gguf
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "(no GGUF selected)".to_string());
         let mut system = base_system;
+        system.push_str("\n\n### CHATTYCOG COCKPIT ORIENTATION\n");
+        system.push_str(&build_wakeup_orientation(
+            &model_label,
+            self.sandbox_dir.is_some(),
+            self.module_registry.modules.len(),
+            self.prefs.allow_sandbox_tool_requests,
+        ));
+        system.push('\n');
         if !departments_context.trim().is_empty() {
-            system.push_str("\n\n### DEPARTMENT STATUS UPDATES\n");
-            system.push_str(&truncate_for_ui(departments_context.trim(), 4_000));
+            system.push_str("\n\n### BACKGROUND MEMORY: DEPARTMENT STATUS\n");
+            system.push_str("These are older module rundowns for continuity. They are not the user's current request. Use them only if the current user message clearly asks for or depends on them.\n");
+            system.push_str(&truncate_for_ui(departments_context.trim(), 2_000));
             system.push('\n');
         }
         if !lukewarm_context.trim().is_empty() {
-            system.push_str("\n### RECENT ACTIVITY (LUKE WARM)\n");
-            system.push_str(&truncate_for_ui(lukewarm_context.trim(), 2_000));
+            system.push_str("\n### BACKGROUND MEMORY: RECENT ACTIVITY\n");
+            system.push_str("This is a rolling summary, not an instruction. Do not continue old tasks unless the user asks.\n");
+            system.push_str(&truncate_for_ui(lukewarm_context.trim(), 1_200));
             system.push('\n');
         }
         let shared_lukewarm_context = self.build_applied_lukewarm_prompt_block();
         if !shared_lukewarm_context.trim().is_empty() {
-            system.push_str("\n### NETWORK-SHARED LUKE WARM\n");
-            system.push_str(&truncate_for_ui(shared_lukewarm_context.trim(), 3_000));
+            system.push_str("\n### BACKGROUND MEMORY: NETWORK-SHARED CONTEXT\n");
+            system.push_str("This context came from another local ChattyCog peer. Treat it as optional background unless the current user message refers to it.\n");
+            system.push_str(&truncate_for_ui(shared_lukewarm_context.trim(), 1_600));
             system.push('\n');
         }
         let recent_chat_context = build_recent_chat_prompt_context(&self.messages, 8, 6_000);
         if !recent_chat_context.trim().is_empty() {
             system.push_str("\n### RECENT CHAT CONTEXT\n");
+            system.push_str("Previous turns are context only. The current user message is the immediate task.\n");
             system.push_str(&recent_chat_context);
             system.push('\n');
         }
@@ -6836,7 +6985,8 @@ impl ChattyCogApp {
             DEFAULT_SANDBOX_TASK_LEDGER_REL_PATH,
         );
         if !sandbox_context.trim().is_empty() {
-            system.push_str("\n### SANDBOX CONTEXT\n");
+            system.push_str("\n### LOCAL SANDBOX CONTEXT\n");
+            system.push_str("This describes local files available through approved sandbox actions. Do not summarize the sandbox unless it helps answer the current user message.\n");
             system.push_str(&sandbox_context);
             system.push('\n');
         }
@@ -6860,11 +7010,13 @@ impl ChattyCogApp {
                 "\n### SANDBOX TOOL POLICY\n\
 You cannot read or write files directly, but you can request sandbox actions for the user to approve.\n\
 The persistent working scratchpad lives at `scratchpad/current.md` inside `Chatty_Sandbox/`.\n\
-Use the scratchpad to keep durable notes, extracted facts, intermediate plans, and reminders that should survive context-window pressure.\n\
+AI sandbox file actions are limited to plain text notes only: `.txt` and `.md` files.\n\
+Only request sandbox actions when they are useful for the user's current request. Do not emit tool JSON during ordinary conversation, greetings, or orientation unless the user asks you to inspect or update files.\n\
+Use the scratchpad to keep durable notes, extracted facts, intermediate plans, and reminders that should survive context-window pressure when the current task benefits from that.\n\
 The structured task ledger lives at `scratchpad/task_ledger.md` and is the best place to keep the current task, next step, open questions, and files touched.\n\
 For longer tasks, update the task ledger whenever the plan meaningfully changes.\n\
 For complex or multi-step tasks, prefer a deterministic preload first so you can inspect the sandbox state before acting.\n\
-Output one or more JSON objects, each on its own line and with no surrounding commentary, using one of:\n\
+When you do need sandbox help, output one or more JSON objects, each on its own line and with no surrounding commentary, using one of:\n\
   {\"tool\":\"sandbox.write\",\"path\":\"notes/Ready.md\",\"contents\":\"...\"}\n\
   {\"tool\":\"sandbox.append\",\"path\":\"scratchpad/current.md\",\"contents\":\"\\n- new note\"}\n\
   {\"tool\":\"sandbox.read\",\"path\":\"notes/Ready.md\"}\n\
@@ -6941,6 +7093,11 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         if let Some(c) = &self.gen_cancel {
             c.store(true, Ordering::Relaxed);
         }
+        self.pulse_ecg(24.0, "Interrupted the current chat response.");
+    }
+
+    fn pulse_ecg(&mut self, intensity: f32, note: &str) {
+        self.ecg_window.record_activity(intensity, note);
     }
 
     fn on_module_suspend(&mut self, module_id: &str) {
@@ -7741,7 +7898,7 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         for action in self.pending_sandbox_actions.drain(..) {
             match action {
                 SandboxAction::Write { path, contents } => {
-                    match sandbox_write(&dir, &path, &contents) {
+                    match sandbox_ai_text_guard(&path).and_then(|_| sandbox_write(&dir, &path, &contents)) {
                         Ok(p) => {
                             status_lines.push(format!("Wrote {}", p.display()));
                             result_lines.push(format!(
@@ -7757,7 +7914,7 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     }
                 }
                 SandboxAction::Append { path, contents } => {
-                    match sandbox_append(&dir, &path, &contents) {
+                    match sandbox_ai_text_guard(&path).and_then(|_| sandbox_append(&dir, &path, &contents)) {
                         Ok(p) => {
                             status_lines.push(format!("Appended {}", p.display()));
                             result_lines.push(format!(
@@ -7772,7 +7929,9 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                         Err(e) => status_lines.push(format!("Append blocked/failed ({path}): {e}")),
                     }
                 }
-                SandboxAction::Read { path } => match sandbox_read(&dir, &path, 200_000) {
+                SandboxAction::Read { path } => match sandbox_ai_text_guard(&path)
+                    .and_then(|_| sandbox_read(&dir, &path, 200_000))
+                {
                     Ok(s) => {
                         let preview = truncate_for_ui(&s, 400);
                         status_lines.push(format!("Read {path}: {preview}"));
@@ -7847,9 +8006,15 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     include_ledger,
                     note,
                 } => {
+                    let original_count = paths.len();
+                    let filtered_paths = paths
+                        .into_iter()
+                        .filter(|path| sandbox_rel_path_is_ai_text_allowed(path))
+                        .collect::<Vec<_>>();
+                    let skipped_count = original_count.saturating_sub(filtered_paths.len());
                     match sandbox_preload(
                         &dir,
-                        &paths,
+                        &filtered_paths,
                         include_list,
                         include_scratchpad,
                         include_ledger,
@@ -7857,6 +8022,11 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     ) {
                         Ok(result) => {
                             status_lines.push(format!("Preloaded {} item(s)", result.loaded_count));
+                            if skipped_count > 0 {
+                                status_lines.push(format!(
+                                    "Skipped {skipped_count} non-text sandbox path(s)"
+                                ));
+                            }
                             result_lines.push(result.prompt_block);
                             if include_scratchpad {
                                 if let Ok(rel) =
@@ -7870,7 +8040,7 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                                 {
                                     last_opened = Some(dir.join(rel));
                                 }
-                            } else if let Some(first_path) = paths.first() {
+                            } else if let Some(first_path) = filtered_paths.first() {
                                 if let Ok(rel) = parse_sandbox_rel_path(first_path) {
                                     last_opened = Some(dir.join(rel));
                                 }
@@ -7889,7 +8059,7 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         }
 
         if let Some(path) = last_opened {
-            self.open_sandbox_file_in_editor(&path);
+            self.open_sandbox_file_and_focus_tab(&path);
         }
 
         if result_lines.is_empty() {
@@ -7937,6 +8107,9 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
             match ev {
                 GenEvent::Token(t) => {
                     self.assistant_draft.push_str(&t);
+                    if trim_exact_repeated_suffix(&mut self.assistant_draft) {
+                        self.runtime_status = "Runtime: trimmed repeated draft loop.".to_string();
+                    }
                     self.scroll_to_bottom = true;
                 }
                 GenEvent::Info(s) => {
@@ -7946,7 +8119,9 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     self.messages.push(Message {
                         role: Role::Assistant,
                         content: format!("Error: {e}"),
+                        thinking: None,
                     });
+                    trim_live_chat_messages(&mut self.messages);
                     self.runtime_status = format!("Runtime error: {e}");
                     self.assistant_draft.clear();
                     self.scroll_to_bottom = true;
@@ -7962,11 +8137,19 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
             self.gen_cancel = None;
             self.gen_rx = None;
             if !self.assistant_draft.trim().is_empty() {
-                let content = std::mem::take(&mut self.assistant_draft);
+                trim_exact_repeated_suffix(&mut self.assistant_draft);
+                let raw_content = std::mem::take(&mut self.assistant_draft);
+                let (content, thinking) = split_assistant_output(&raw_content);
+                if content.trim().is_empty() {
+                    self.scroll_to_bottom = true;
+                    return;
+                }
                 self.messages.push(Message {
                     role: Role::Assistant,
                     content: content.clone(),
+                    thinking,
                 });
+                trim_live_chat_messages(&mut self.messages);
                 push_hot_memory(self, format!("Assistant: {}", one_line(&content, 120)));
                 if self.networking_shared_chat_mirror_main_chat
                     && self.shared_chat_local_ai_allowed()
@@ -8020,6 +8203,8 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
 
 impl eframe::App for ChattyCogApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ecg_window.tick(Instant::now());
+        ctx.request_repaint_after(self.ecg_window.refresh_interval());
         // Module on-suspend handshake: when leaving a module tab, debrief the bookkeeper.
         if self.prev_tab != self.tab {
             if let Tab::Module(old_id) = &self.prev_tab {
@@ -8498,7 +8683,7 @@ impl eframe::App for ChattyCogApp {
             }
         }
 
-        if self.tab == Tab::Logs && self.lukewarm_rx.is_none() {
+        if matches!(self.tab, Tab::Logs | Tab::Chat) && self.lukewarm_rx.is_none() {
             if let Some(due) = self.lukewarm_poll_due {
                 if Instant::now() >= due {
                     self.lukewarm_poll_due = None;
@@ -8542,24 +8727,7 @@ impl eframe::App for ChattyCogApp {
                             dialog = dialog.set_directory(dir);
                         }
                         if let Some(path) = dialog.pick_file() {
-                            self.gguf_path = Some(path);
-                            if let Some(bk) = &self.bookkeeper {
-                                bk.append(MemoryEvent {
-                                    ts_unix_ms: now_unix_ms(),
-                                    kind: MemoryKind::Cold,
-                                    category: EventCategory::Module,
-                                    source: "ui".to_string(),
-                                    module: Some("models".to_string()),
-                                    event_type: Some("select".to_string()),
-                                    text: format!(
-                                        "Selected model: {}",
-                                        self.gguf_path.as_ref().unwrap().display()
-                                    ),
-                                    tags: Vec::new(),
-                                    entities: Vec::new(),
-                                    payload_json: None,
-                                });
-                            }
+                            self.set_active_chat_model_path(Some(path));
                         }
                     }
                     if ui.button("Clear Chat").clicked() {
@@ -8895,11 +9063,14 @@ fn close_module_tab_force(app: &mut ChattyCogApp, module_id: &str) {
 }
 
 fn left_sidebar_chat(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
-    ui.heading("Hot Memory");
+    ui.heading("Chat");
     ui.separator();
-    if app.hot_memory.is_empty() {
+    ui.label("Hot memory and luke-warm context now live inside the main chat layout.");
+    ui.small("Model selection and orchestrator settings live in the Models tab.");
+    ui.add_space(8.0);
+    if false && app.hot_memory.is_empty() {
         ui.label("(empty)");
-    } else {
+    } else if false {
         ui.group(|ui| {
             for item in &app.hot_memory {
                 ui.label(format!("• {item}"));
@@ -8924,87 +9095,18 @@ fn left_sidebar_chat(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     });
 
     ui.add_space(8.0);
-    ui.heading("Session");
-    ui.separator();
-
-    ui.label("Model file");
-    if ui.button("Refresh models").clicked() {
-        app.models_cache = scan_ggufs(app.models_dir.as_deref());
-    }
-
-    if app.models_cache.is_empty() {
-        app.models_cache = scan_ggufs(app.models_dir.as_deref());
-    }
-
-    if !app.models_cache.is_empty() {
-        egui::ComboBox::from_label("Models")
-            .selected_text(
-                app.gguf_path
-                    .as_ref()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .unwrap_or_else(|| "(none)".to_string()),
-            )
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut app.gguf_path, None, "(none)");
-                for p in &app.models_cache {
-                    let label = p
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    ui.selectable_value(&mut app.gguf_path, Some(p.clone()), label);
-                }
-            });
-    }
-
-    if ui.button("Pick GGUF...").clicked() {
-        let mut dialog = rfd::FileDialog::new().add_filter("GGUF", &["gguf"]);
-        if let Some(dir) = &app.models_dir {
-            dialog = dialog.set_directory(dir);
-        }
-        if let Some(path) = dialog.pick_file() {
-            app.gguf_path = Some(path);
-        }
-    }
-    ui.add_enabled_ui(app.gguf_path.is_some(), |ui| {
-        if ui.button("Unload").clicked() {
-            app.gguf_path = None;
-            if let Some(bk) = &app.bookkeeper {
-                bk.append(MemoryEvent {
-                    ts_unix_ms: now_unix_ms(),
-                    kind: MemoryKind::Cold,
-                    category: EventCategory::Module,
-                    source: "ui".to_string(),
-                    module: Some("models".to_string()),
-                    event_type: Some("unload".to_string()),
-                    text: "Unloaded model".to_string(),
-                    tags: Vec::new(),
-                    entities: Vec::new(),
-                    payload_json: None,
-                });
-            }
-        }
-    });
-
-    ui.separator();
-    ui.heading("Run");
-    ui.heading("Orchestrator Params");
-    add_presets_orchestrator(ui, app);
-    ui.add(egui::Slider::new(&mut app.orch_temp, 0.0..=2.0).text("temp"));
-    ui.add(egui::Slider::new(&mut app.orch_top_p, 0.0..=1.0).text("top_p"));
-    ui.add(egui::Slider::new(&mut app.orch_top_k, 0..=200).text("top_k"));
-    ui.add(egui::Slider::new(&mut app.orch_max_tokens, 1..=4096).text("max_tokens"));
+    ui.small("Use the Models tab for GGUF selection, presets, and orchestrator tuning.");
 
     ui.separator();
     ui.add_enabled_ui(app.is_generating, |ui| {
-        if ui.button("Stop").clicked() {
+        if ui.button("Stop current response").clicked() {
             app.stop_generation();
         }
     });
 
     ui.separator();
-    ui.heading("Tools");
-    if ui.button("Clear Chat").clicked() {
+    if ui.button("Clear chat transcript").clicked() {
+        app.pulse_ecg(18.0, "Cleared the chat transcript.");
         app.messages.retain(|m| m.role == Role::System);
         app.assistant_draft.clear();
         if let Some(bk) = &app.bookkeeper {
@@ -9257,10 +9359,264 @@ fn left_sidebar_about(ui: &mut egui::Ui, _app: &mut ChattyCogApp) {
     ui.label("ChattyCog • Rust GUI");
 }
 
+fn render_chat_hot_memory_panel(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_height: f32) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_height(panel_height);
+        ui.heading("Hot Memory");
+        ui.small("Recent working cues that stay visible while the conversation moves.");
+        ui.add_space(8.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("chat_hot_memory_scroll")
+            .max_height((panel_height - 92.0).max(120.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if app.hot_memory.is_empty() {
+                    ui.label("(empty)");
+                } else {
+                    for item in app.hot_memory.iter().rev() {
+                        egui::Frame::none()
+                            .fill(ui.visuals().faint_bg_color)
+                            .rounding(egui::Rounding::same(6.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                            .show(ui, |ui| {
+                                ui.add(egui::Label::new(item.as_str()).wrap());
+                            });
+                        ui.add_space(6.0);
+                    }
+                }
+            });
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Clear").clicked() {
+                app.hot_memory.clear();
+            }
+            if ui.button("Pin current").clicked() {
+                let last_user = app
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == Role::User)
+                    .map(|m| m.content.clone());
+                if let Some(t) = last_user {
+                    push_hot_memory(app, format!("User intent: {}", one_line(&t, 160)));
+                }
+            }
+        });
+    });
+}
+
+fn render_chat_lukewarm_panel(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_height: f32) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_height(panel_height);
+        ui.heading("Luke Warm");
+        ui.small("Rolling summary from the bookkeeper so longer sessions stay grounded.");
+        ui.add_space(8.0);
+
+        let mut text = if app.lukewarm_summary.trim().is_empty() {
+            "(no summary yet)".to_string()
+        } else {
+            app.lukewarm_summary.clone()
+        };
+
+        egui::ScrollArea::vertical()
+            .id_salt("chat_lukewarm_scroll")
+            .max_height((panel_height - 64.0).max(120.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(18)
+                        .interactive(false),
+                );
+            });
+    });
+}
+
+fn render_chat_ecg_window(ui: &mut egui::Ui, app: &ChattyCogApp) {
+    let payload = app.ecg_window.payload();
+    let desired_size = egui::vec2(208.0, 60.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+
+    let surface = egui::Color32::from_rgb(238, 244, 248);
+    let chart_surface = egui::Color32::from_rgb(247, 250, 252);
+    let border = egui::Color32::from_rgb(152, 168, 182);
+    let muted = ui.visuals().weak_text_color();
+    let accent = if payload.current_percent >= 55.0 {
+        egui::Color32::from_rgb(42, 146, 92)
+    } else if payload.current_percent >= 20.0 {
+        egui::Color32::from_rgb(88, 123, 168)
+    } else {
+        muted.gamma_multiply(0.9)
+    };
+    let state = if !payload.supported {
+        "unsupported"
+    } else if payload.available {
+        "live"
+    } else {
+        "waiting"
+    };
+
+    ui.painter().rect(
+        rect,
+        egui::Rounding::same(8.0),
+        surface,
+        egui::Stroke::new(1.0, border),
+    );
+
+    let inner = rect.shrink2(egui::vec2(10.0, 8.0));
+    let small_font = egui::TextStyle::Small.resolve(ui.style());
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let heading_font = egui::TextStyle::Button.resolve(ui.style());
+
+    ui.painter().text(
+        inner.left_top(),
+        egui::Align2::LEFT_TOP,
+        "ECG",
+        heading_font,
+        egui::Color32::from_rgb(74, 92, 112),
+    );
+    ui.painter().text(
+        egui::pos2(inner.min.x + 34.0, inner.min.y + 2.0),
+        egui::Align2::LEFT_TOP,
+        state,
+        small_font,
+        muted.gamma_multiply(0.9),
+    );
+    ui.painter().text(
+        inner.right_top(),
+        egui::Align2::RIGHT_TOP,
+        format!("{:.0}%", payload.current_percent),
+        body_font,
+        accent,
+    );
+
+    let chart_rect = egui::Rect::from_min_max(
+        egui::pos2(inner.min.x, inner.min.y + 22.0),
+        egui::pos2(inner.max.x, inner.max.y - 10.0),
+    );
+    ui.painter().rect_filled(
+        chart_rect.expand2(egui::vec2(1.0, 2.0)),
+        egui::Rounding::same(5.0),
+        chart_surface,
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(chart_rect.left(), chart_rect.bottom()),
+            egui::pos2(chart_rect.right(), chart_rect.bottom()),
+        ],
+        egui::Stroke::new(1.0, border.gamma_multiply(0.6)),
+    );
+
+    let points = app
+        .ecg_window
+        .points(chart_rect.width(), chart_rect.height())
+        .into_iter()
+        .map(|point| egui::pos2(chart_rect.left() + point.x, chart_rect.top() + point.y))
+        .collect::<Vec<_>>();
+
+    if points.len() >= 2 {
+        ui.painter()
+            .add(egui::Shape::line(points, egui::Stroke::new(1.8, accent)));
+    } else if let Some(point) = points.first() {
+        ui.painter().circle_filled(*point, 2.0, accent);
+    }
+
+    response.on_hover_text(format!(
+        "{}\nState: {}\n{}\nCurrent: {:.0}%",
+        payload.label, state, payload.note, payload.current_percent
+    ));
+}
+
 fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
     egui::TopBottomPanel::top("chat_status").show_inside(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.small(&app.runtime_status);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.small(&app.runtime_status);
+                    let (badge, color) = runtime_backend_summary(&app.runtime_status);
+                    ui.colored_label(color, format!("[{badge}]"));
+                    ui.small("Vulkan can still be active even when a few tensors stay on CPU.");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if app.models_cache.is_empty() {
+                        app.models_cache = scan_ggufs(app.models_dir.as_deref());
+                    }
+                    let model_opts =
+                        build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
+                    let selected_hint = app.portable_model_hint(app.gguf_path.as_deref());
+                    let selected_label = selected_hint
+                        .as_ref()
+                        .and_then(|hint| {
+                            model_opts
+                                .iter()
+                                .find(|option| option.value == *hint)
+                                .map(|option| option.label.clone())
+                        })
+                        .or_else(|| {
+                            app.gguf_path.as_ref().map(|path| {
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| path.display().to_string())
+                            })
+                        })
+                        .unwrap_or_else(|| "(none)".to_string());
+
+                    ui.small("Model:");
+                    egui::ComboBox::from_id_salt("chat_model_combo")
+                        .selected_text(selected_label)
+                        .width(260.0)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(app.gguf_path.is_none(), "(none)")
+                                .clicked()
+                            {
+                                app.set_active_chat_model_path(None);
+                            }
+                            for option in &model_opts {
+                                let selected =
+                                    selected_hint.as_deref() == Some(option.value.as_str());
+                                if ui.selectable_label(selected, &option.label).clicked() {
+                                    let path = app.resolve_portable_model_hint(Some(&option.value));
+                                    app.set_active_chat_model_path(path);
+                                }
+                            }
+                        });
+                    if ui.button("Open GGUF...").clicked() {
+                        let mut dialog = rfd::FileDialog::new().add_filter("GGUF", &["gguf"]);
+                        if let Some(dir) = &app.models_dir {
+                            dialog = dialog.set_directory(dir);
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            app.set_active_chat_model_path(Some(path));
+                        }
+                    }
+                    if ui.button("Refresh models").clicked() {
+                        app.models_cache = scan_ggufs(app.models_dir.as_deref());
+                    }
+                    ui.small(format!("Chat max tokens: {}", app.orch_max_tokens));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(capsule) = app.active_orchestrator_capsule() {
+                        let preview = truncate_for_ui(&one_line(&capsule.text, 120), 88);
+                        ui.small(format!("Voice: capsule '{}'", capsule.name));
+                        ui.small(format!("Preview: {preview}"));
+                        if ui.button("Use native voice").clicked() {
+                            app.prefs.active_orchestrator_capsule = None;
+                            app.prefs_status =
+                                "Capsule deselected. ChattyCog native voice restored.".to_string();
+                        }
+                    } else {
+                        ui.small("Voice: native ChattyCog");
+                        ui.small("No capsule selected.");
+                    }
+                });
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                render_chat_ecg_window(ui, app);
+            });
         });
         if app.sandbox_dir.is_some() {
             ui.horizontal_wrapped(|ui| {
@@ -9331,6 +9687,63 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
             });
             ui.add_space(4.0);
         }
+
+        ui.group(|ui| {
+            let sandbox_mode_available =
+                app.prefs.allow_sandbox_tool_requests && app.sandbox_dir.is_some();
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut app.sandbox_task_enabled, "Sandbox task");
+                ui.small("Mark this turn as a sandbox file request so the model skips the guesswork.");
+            });
+            if app.sandbox_task_enabled {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_enabled_ui(sandbox_mode_available, |ui| {
+                        ui.selectable_value(
+                            &mut app.sandbox_task_intent,
+                            SandboxTaskIntent::Create,
+                            "Create file",
+                        );
+                        ui.selectable_value(
+                            &mut app.sandbox_task_intent,
+                            SandboxTaskIntent::Edit,
+                            "Edit file",
+                        );
+                    });
+                    ui.label("Target:");
+                    let response = ui.add_enabled(
+                        sandbox_mode_available,
+                        egui::TextEdit::singleline(&mut app.sandbox_task_path)
+                            .hint_text("notes/request.md")
+                            .desired_width(220.0),
+                    );
+                    if response.changed() {
+                        app.sandbox_task_path =
+                            normalize_sandbox_task_path_input(&app.sandbox_task_path);
+                    }
+                });
+                let normalized_path = normalize_sandbox_task_path_input(&app.sandbox_task_path);
+                if app.sandbox_task_path != normalized_path {
+                    app.sandbox_task_path = normalized_path.clone();
+                }
+                if !sandbox_mode_available {
+                    ui.small(
+                        "Sandbox task mode needs `Allow sandbox tool requests` enabled and a live `Chatty_Sandbox/` folder.",
+                    );
+                } else if normalized_path.is_empty() {
+                    ui.small("Enter a sandbox `.md` or `.txt` path for this task.");
+                } else if let Err(err) = sandbox_ai_text_guard(&normalized_path) {
+                    ui.small(format!("Sandbox path blocked: {err}"));
+                } else {
+                    ui.small(format!(
+                        "This turn will explicitly tell the AI to {} `Chatty_Sandbox/{}`.",
+                        app.sandbox_task_intent.summary_verb(),
+                        normalized_path
+                    ));
+                }
+            }
+        });
+        ui.add_space(4.0);
 
         if !app.pending_sandbox_actions.is_empty() {
             if !app.prefs.allow_sandbox_tool_requests {
@@ -9443,76 +9856,180 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
 
         ui.horizontal(|ui| {
             let paused = app.orch_freeze_pending || matches!(&app.tab, Tab::Module(_));
-            let input = ui.add_enabled_ui(!paused, |ui| {
+            let waiting_for_reply = app.is_generating;
+            let composer_enabled = !paused && !waiting_for_reply;
+            let input = ui.add_enabled_ui(composer_enabled, |ui| {
                 ui.add_sized(
-                    [ui.available_width() - 110.0, 28.0],
-                    egui::TextEdit::singleline(&mut app.composer)
+                    [ui.available_width() - 200.0, 56.0],
+                    egui::TextEdit::multiline(&mut app.composer)
                         .hint_text(if paused {
                             "Orchestrator paused (module active)..."
+                        } else if waiting_for_reply {
+                            "Please wait for the current reply to finish or press Interrupt..."
                         } else {
-                            "Type a message..."
+                            "Type a message...  Enter sends, Shift+Enter adds a new line."
                         })
+                        .desired_rows(2)
                         .desired_width(f32::INFINITY),
                 )
             });
 
-            if input.inner.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if input.inner.has_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+            {
                 send_now = true;
             }
 
-            ui.add_enabled_ui(!app.is_generating && !paused, |ui| {
+            ui.add_enabled_ui(!waiting_for_reply && !paused, |ui| {
                 if ui.button("Send").clicked() {
                     send_now = true;
                 }
             });
+            ui.add_enabled_ui(waiting_for_reply, |ui| {
+                if ui.button("Interrupt").clicked() {
+                    app.stop_generation();
+                }
+            });
         });
+        if app.is_generating {
+            ui.horizontal_wrapped(|ui| {
+                ui.small(
+                    "Please wait: ChattyCog is still generating the current reply. Interrupt it if you want to change course before sending another message.",
+                );
+            });
+        }
         ui.add_space(2.0);
     });
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        egui::Frame::none()
-            .fill(egui::Color32::WHITE)
-            .inner_margin(egui::Margin::same(10.0))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("chat_scroll")
-                    .stick_to_bottom(app.scroll_to_bottom)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for msg in &app.messages {
-                            message_bubble(ui, msg);
-                        }
-                        if app.is_generating && !app.assistant_draft.is_empty() {
-                            message_bubble(
-                                ui,
-                                &Message {
-                                    role: Role::Assistant,
-                                    content: app.assistant_draft.clone(),
-                                },
-                            );
-                        }
-                    });
-            });
+        let panel_height = ui.available_height().max(320.0);
+        let gap = 10.0;
+        let side_width = (ui.available_width() * 0.22).clamp(220.0, 320.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(side_width, panel_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| render_chat_hot_memory_panel(ui, app, panel_height),
+            );
+            ui.add_space(gap);
+
+            let center_width = (ui.available_width() - side_width - gap).max(320.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(center_width, panel_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::Frame::group(ui.style())
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.heading("Chat");
+                            ui.add_space(6.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("chat_scroll")
+                                .stick_to_bottom(app.scroll_to_bottom)
+                                .auto_shrink([false, false])
+                                .max_height(panel_height - 24.0)
+                                .show(ui, |ui| {
+                                    for msg in &app.messages {
+                                        message_bubble(ui, msg);
+                                    }
+                                    if app.is_generating && !app.assistant_draft.is_empty() {
+                                        let (visible, thinking) =
+                                            split_assistant_output(&app.assistant_draft);
+                                        message_bubble(
+                                            ui,
+                                            &Message {
+                                                role: Role::Assistant,
+                                                content: visible,
+                                                thinking,
+                                            },
+                                        );
+                                    }
+                                });
+                        });
+                },
+            );
+            ui.add_space(gap);
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(side_width, panel_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| render_chat_lukewarm_panel(ui, app, panel_height),
+            );
+        });
     });
 
     app.scroll_to_bottom = false;
 
     if send_now {
+        if app.is_generating {
+            app.runtime_status =
+                "Runtime: please wait for the current reply to finish, or press Interrupt."
+                    .to_string();
+            ctx.request_repaint();
+            return;
+        }
         let content = app.composer.trim().to_string();
         if !content.is_empty() {
+            let sandbox_path = normalize_sandbox_task_path_input(&app.sandbox_task_path);
+            let sandbox_mode_active = app.sandbox_task_enabled;
+            let mut generation_prompt = content.clone();
+            let visible_user_message = if sandbox_mode_active {
+                format!(
+                    "[Sandbox {} -> {}] {}",
+                    app.sandbox_task_intent.label(),
+                    sandbox_path,
+                    content
+                )
+            } else {
+                content.clone()
+            };
             app.sandbox_task_nudge =
                 build_task_ledger_user_hint(&content, app.sandbox_dir.as_deref())
                     .unwrap_or_default();
+            if sandbox_mode_active {
+                if !app.prefs.allow_sandbox_tool_requests {
+                    app.sandbox_action_status =
+                        "Sandbox task mode needs `Allow sandbox tool requests` turned on."
+                            .to_string();
+                    ctx.request_repaint();
+                    return;
+                }
+                if app.sandbox_dir.is_none() {
+                    app.sandbox_action_status =
+                        "Sandbox task mode needs a live `Chatty_Sandbox/` folder.".to_string();
+                    ctx.request_repaint();
+                    return;
+                }
+                if sandbox_path.is_empty() {
+                    app.sandbox_action_status =
+                        "Sandbox task mode needs a target `.md` or `.txt` path.".to_string();
+                    ctx.request_repaint();
+                    return;
+                }
+                if let Err(err) = sandbox_ai_text_guard(&sandbox_path) {
+                    app.sandbox_action_status = format!("Sandbox task path blocked: {err}");
+                    ctx.request_repaint();
+                    return;
+                }
+                generation_prompt = build_explicit_sandbox_task_prompt(
+                    &content,
+                    &sandbox_path,
+                    app.sandbox_task_intent,
+                );
+            }
             if let Err(reason) = app.shared_chat_can_send_mirrored_main_chat_message() {
                 app.networking_status = format!("Shared room: {reason}");
                 ctx.request_repaint();
                 return;
             }
             app.composer.clear();
+            app.pulse_ecg(20.0, "Queued a chat message.");
             app.messages.push(Message {
                 role: Role::User,
-                content: content.clone(),
+                content: visible_user_message,
+                thinking: None,
             });
+            trim_live_chat_messages(&mut app.messages);
             push_hot_memory(app, format!("User: {}", one_line(&content, 120)));
             if let Some(bk) = &app.bookkeeper {
                 bk.append(MemoryEvent {
@@ -9533,7 +10050,7 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
                 app.broadcast_shared_chat_message("user", "You", &content);
             }
             if app.shared_chat_local_ai_allowed() {
-                app.start_generation(content);
+                app.start_generation(generation_prompt);
             } else {
                 app.runtime_status =
                     "Runtime: shared room policy left AI off for this local turn.".to_string();
@@ -9565,7 +10082,8 @@ fn start_runtime_info_probe() -> Option<Receiver<String>> {
     Some(rx)
 }
 
-fn models_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
+#[allow(dead_code)]
+fn models_tab_legacy(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     ui.heading("Preferences");
     ui.separator();
 
@@ -9747,6 +10265,455 @@ fn models_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             });
         }
     });
+        });
+}
+
+fn models_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
+    ui.heading("Preferences");
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .id_salt("prefs_scroll_v2")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Prefs file: {}", app.prefs_path.display()));
+                if ui.button("Reload").clicked() {
+                    match preferences::load_prefs(&app.prefs_path) {
+                        Ok(p) => {
+                            app.prefs = p;
+                            app.ensure_persisted_network_identity();
+                            app.apply_prefs_to_runtime_settings();
+                            app.sync_capsule_selection_from_prefs();
+                            app.networking
+                                .set_device_name(&app.prefs.network_device_name);
+                            app.networking
+                                .set_allow_unknown_devices(app.prefs.network_allow_unknown_devices);
+                            let blocked = app
+                                .prefs
+                                .network_blocked_devices
+                                .iter()
+                                .map(|peer| BlockedPeer {
+                                    device_id: peer.device_id.clone(),
+                                    device_name: peer.device_name.clone(),
+                                    address: String::new(),
+                                    last_seen_secs_ago: None,
+                                })
+                                .collect::<Vec<_>>();
+                            app.networking.replace_blocked_peers(&blocked);
+                            let trusted = app
+                                .prefs
+                                .network_trusted_devices
+                                .iter()
+                                .map(|peer| TrustedPeer {
+                                    device_id: peer.device_id.clone(),
+                                    device_name: peer.device_name.clone(),
+                                    address: String::new(),
+                                    last_seen_secs_ago: None,
+                                })
+                                .collect::<Vec<_>>();
+                            app.networking.replace_trusted_peers(&trusted);
+                            app.networking_device_name_input =
+                                app.networking.snapshot().device_name.clone();
+                            app.prefs_status = "Reloaded preferences.".to_string();
+                        }
+                        Err(e) => app.prefs_status = format!("Reload failed: {e}"),
+                    }
+                }
+                if ui.button("Save").clicked() {
+                    app.ensure_persisted_network_identity();
+                    match preferences::save_prefs(&app.prefs_path, &app.prefs) {
+                        Ok(()) => app.prefs_status = "Saved preferences.".to_string(),
+                        Err(e) => app.prefs_status = format!("Save failed: {e}"),
+                    }
+                }
+            });
+
+            if !app.prefs_status.trim().is_empty() {
+                ui.small(app.prefs_status.clone());
+            }
+
+            ui.add_space(8.0);
+            ui.columns(2, |columns| {
+                let left = &mut columns[0];
+                left.group(|ui| {
+                    ui.heading("Orchestrator (Chat)");
+                    let mut live_changed = false;
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy from current").clicked() {
+                            app.prefs.orchestrator.temp = app.orch_temp;
+                            app.prefs.orchestrator.top_p = app.orch_top_p;
+                            app.prefs.orchestrator.top_k = app.orch_top_k;
+                            app.prefs.orchestrator.max_tokens = app.orch_max_tokens;
+                            app.prefs_status = "Copied orchestrator settings.".to_string();
+                        }
+                        if ui.button("Apply to current").clicked() {
+                            app.orch_temp = app.prefs.orchestrator.temp;
+                            app.orch_top_p = app.prefs.orchestrator.top_p;
+                            app.orch_top_k = app.prefs.orchestrator.top_k;
+                            app.orch_max_tokens = app.prefs.orchestrator.max_tokens;
+                            app.prefs_status = "Applied orchestrator settings.".to_string();
+                        }
+                    });
+                    add_presets_prefs_orchestrator(ui, &mut app.prefs.orchestrator);
+                    live_changed |= ui
+                        .add(egui::Slider::new(&mut app.prefs.orchestrator.temp, 0.0..=2.0).text("temp"))
+                        .changed();
+                    live_changed |= ui
+                        .add(egui::Slider::new(&mut app.prefs.orchestrator.top_p, 0.0..=1.0).text("top_p"))
+                        .changed();
+                    live_changed |= ui
+                        .add(egui::Slider::new(&mut app.prefs.orchestrator.top_k, 0..=200).text("top_k"))
+                        .changed();
+                    live_changed |= ui
+                        .add(
+                        egui::Slider::new(&mut app.prefs.orchestrator.max_tokens, 1..=4096)
+                            .text("max_tokens"))
+                        .changed();
+                    if live_changed {
+                        app.apply_live_orchestrator_prefs();
+                        app.prefs_status =
+                            format!("Live chat settings updated. Chat max tokens now {}.", app.orch_max_tokens);
+                    }
+                });
+
+                left.add_space(8.0);
+                left.group(|ui| {
+                    ui.heading("Bookkeeper (CPU)");
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy from current").clicked() {
+                            app.prefs.bookkeeper.temp = app.bookkeeper_temp;
+                            app.prefs.bookkeeper.top_p = app.bookkeeper_top_p;
+                            app.prefs.bookkeeper.top_k = app.bookkeeper_top_k;
+                            app.prefs.bookkeeper.max_tokens = app.bookkeeper_max_tokens;
+                            app.prefs_status = "Copied bookkeeper settings.".to_string();
+                        }
+                        if ui.button("Apply to current").clicked() {
+                            app.bookkeeper_temp = app.prefs.bookkeeper.temp;
+                            app.bookkeeper_top_p = app.prefs.bookkeeper.top_p;
+                            app.bookkeeper_top_k = app.prefs.bookkeeper.top_k;
+                            app.bookkeeper_max_tokens = app.prefs.bookkeeper.max_tokens;
+                            app.bookkeeper_restart_due =
+                                Some(Instant::now() + Duration::from_millis(200));
+                            app.prefs_status =
+                                "Applied bookkeeper settings (restart pending).".to_string();
+                        }
+                    });
+                    add_presets_prefs_bookkeeper(ui, &mut app.prefs.bookkeeper);
+                    ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.temp, 0.0..=2.0).text("temp"));
+                    ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.top_p, 0.0..=1.0).text("top_p"));
+                    ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.top_k, 0..=200).text("top_k"));
+                    ui.add(
+                        egui::Slider::new(&mut app.prefs.bookkeeper.max_tokens, 1..=4096)
+                            .text("max_tokens"),
+                    );
+                });
+
+                left.add_space(8.0);
+                left.group(|ui| {
+                    ui.heading("Access / Tools");
+                    ui.checkbox(
+                        &mut app.prefs.allow_sandbox_tool_requests,
+                        "Allow sandbox tool requests (user-approved)",
+                    );
+                    ui.small(
+                        "If disabled, Chat tab won't parse tool JSON requests and will hide the approval panel.",
+                    );
+                    ui.add_space(6.0);
+                    ui.checkbox(
+                        &mut app.prefs.auto_generate_module_suspend_rundown,
+                        "Auto-generate module suspend rundown on tab leave (Bookkeeper)",
+                    );
+                    ui.small(
+                        "If enabled, leaving a module tab will auto-write a short department update into cold logs for cross-module awareness.",
+                    );
+                });
+
+                left.add_space(8.0);
+                left.group(|ui| {
+                    ui.heading("Per-module preferences");
+                    ui.small("Defaults for modules that have AI enabled (or future module runners).");
+
+                    let model_opts =
+                        build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
+                    let modules = app.module_registry.modules.clone();
+                    if modules.is_empty() {
+                        ui.label("(no modules discovered)");
+                        return;
+                    }
+
+                    for m in modules {
+                        ui.push_id(&m.module_id, |ui| {
+                            let entry = app
+                                .prefs
+                                .modules
+                                .entry(m.module_id.clone())
+                                .or_insert_with(ModulePreferences::default);
+
+                            ui.separator();
+                            ui.label(format!("{} ({})", m.display_name, m.module_id));
+
+                            let selected = entry.preferred_model.clone().unwrap_or_default();
+                            let selected_label = model_opts
+                                .iter()
+                                .find(|o| o.value == selected)
+                                .map(|o| o.label.clone())
+                                .unwrap_or_else(|| {
+                                    if selected.is_empty() {
+                                        "(none)".to_string()
+                                    } else {
+                                        selected.clone()
+                                    }
+                                });
+
+                            egui::ComboBox::from_id_salt(("preferred_model", m.module_id.as_str()))
+                                .selected_text(selected_label)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut entry.preferred_model, None, "(none)");
+                                    for o in &model_opts {
+                                        ui.selectable_value(
+                                            &mut entry.preferred_model,
+                                            Some(o.value.clone()),
+                                            o.label.clone(),
+                                        );
+                                    }
+                                });
+
+                            add_presets_prefs_orchestrator(ui, &mut entry.params);
+                            ui.add(egui::Slider::new(&mut entry.params.temp, 0.0..=2.0).text("temp"));
+                            ui.add(egui::Slider::new(&mut entry.params.top_p, 0.0..=1.0).text("top_p"));
+                            ui.add(egui::Slider::new(&mut entry.params.top_k, 0..=200).text("top_k"));
+                            ui.add(
+                                egui::Slider::new(&mut entry.params.max_tokens, 1..=4096)
+                                    .text("max_tokens"),
+                            );
+                            ui.checkbox(
+                                &mut entry.allow_receive_lukewarm_context,
+                                "Allow luke warm context",
+                            );
+                        });
+                    }
+                });
+
+                let right = &mut columns[1];
+                right.group(|ui| {
+                    ui.heading("Capsule Library");
+                    ui.small(
+                        "Save reusable personality or behavior injections here, then activate one when a task needs a different tone, role, or voice.",
+                    );
+                    ui.add_space(6.0);
+
+                    let capsule_names = app
+                        .prefs
+                        .orchestrator_capsules
+                        .iter()
+                        .map(|capsule| capsule.name.clone())
+                        .collect::<Vec<_>>();
+                    let active_label = app
+                        .prefs
+                        .active_orchestrator_capsule
+                        .as_deref()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or("(none)")
+                        .to_string();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Active capsule");
+                        egui::ComboBox::from_id_salt("active_orchestrator_capsule")
+                            .selected_text(active_label)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        app.prefs.active_orchestrator_capsule.is_none(),
+                                        "(none)",
+                                    )
+                                    .clicked()
+                                {
+                                    app.prefs.active_orchestrator_capsule = None;
+                                }
+                                for name in &capsule_names {
+                                    if ui
+                                        .selectable_label(
+                                            app.prefs.active_orchestrator_capsule.as_deref()
+                                                == Some(name.as_str()),
+                                            name,
+                                        )
+                                        .clicked()
+                                    {
+                                        app.prefs.active_orchestrator_capsule = Some(name.clone());
+                                        app.capsule_selected_name = Some(name.clone());
+                                        if let Some(capsule) = app
+                                            .prefs
+                                            .orchestrator_capsules
+                                            .iter()
+                                            .find(|capsule| capsule.name == *name)
+                                        {
+                                            app.capsule_editor_name = capsule.name.clone();
+                                            app.capsule_editor_text = capsule.text.clone();
+                                        }
+                                    }
+                                }
+                            });
+                        if ui.button("Use native voice").clicked() {
+                            app.prefs.active_orchestrator_capsule = None;
+                            app.prefs_status =
+                                "Capsule deselected. ChattyCog native voice restored.".to_string();
+                        }
+                    });
+                    ui.small(
+                        "Choose '(none)' or 'Use native voice' to fall back to ChattyCog's built-in personality.",
+                    );
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Saved capsules");
+                        if ui.button("Deselect editor").clicked() {
+                            app.capsule_selected_name = None;
+                            app.capsule_editor_name.clear();
+                            app.capsule_editor_text.clear();
+                            app.prefs_status = "Capsule editor cleared.".to_string();
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("orchestrator_capsule_list")
+                        .max_height(180.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if capsule_names.is_empty() {
+                                ui.small("No capsules saved yet.");
+                            }
+                            let nothing_selected = app.capsule_selected_name.is_none()
+                                && app.capsule_editor_name.trim().is_empty()
+                                && app.capsule_editor_text.trim().is_empty();
+                            if ui
+                                .selectable_label(nothing_selected, "(deselect editor)")
+                                .clicked()
+                            {
+                                app.capsule_selected_name = None;
+                                app.capsule_editor_name.clear();
+                                app.capsule_editor_text.clear();
+                            }
+                            for name in &capsule_names {
+                                let selected =
+                                    app.capsule_selected_name.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(selected, name).clicked() {
+                                    app.capsule_selected_name = Some(name.clone());
+                                    if let Some(capsule) = app
+                                        .prefs
+                                        .orchestrator_capsules
+                                        .iter()
+                                        .find(|capsule| capsule.name == *name)
+                                    {
+                                        app.capsule_editor_name = capsule.name.clone();
+                                        app.capsule_editor_text = capsule.text.clone();
+                                    }
+                                }
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    ui.label("Capsule name");
+                    ui.text_edit_singleline(&mut app.capsule_editor_name);
+                    ui.add_space(4.0);
+                    ui.label("Capsule instructions");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut app.capsule_editor_text)
+                            .desired_rows(16)
+                            .hint_text(
+                                "Your nickname is Barry. You are a scriptwriter. Answer verbosely and keep a cinematic tone.",
+                            ),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("New").clicked() {
+                            app.capsule_selected_name = None;
+                            app.capsule_editor_name.clear();
+                            app.capsule_editor_text.clear();
+                        }
+
+                        if ui.button("Save capsule").clicked() {
+                            let name = app.capsule_editor_name.trim().to_string();
+                            let text = app.capsule_editor_text.trim().to_string();
+                            if name.is_empty() || text.is_empty() {
+                                app.prefs_status =
+                                    "Capsule needs both a name and instructions.".to_string();
+                            } else if let Some(existing) = app
+                                .prefs
+                                .orchestrator_capsules
+                                .iter_mut()
+                                .find(|capsule| capsule.name == name)
+                            {
+                                existing.text = text;
+                                app.capsule_selected_name = Some(name.clone());
+                                app.prefs_status = format!("Updated capsule '{name}'.");
+                            } else {
+                                app.prefs.orchestrator_capsules.push(PromptCapsule {
+                                    name: name.clone(),
+                                    text,
+                                });
+                                app.prefs.orchestrator_capsules.sort_by(|a, b| {
+                                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                                });
+                                app.capsule_selected_name = Some(name.clone());
+                                app.prefs_status = format!("Saved capsule '{name}'.");
+                            }
+                        }
+
+                        if ui.button("Set active").clicked() {
+                            let name = app.capsule_editor_name.trim().to_string();
+                            if name.is_empty() {
+                                app.prefs_status = "Choose or save a capsule first.".to_string();
+                            } else if app
+                                .prefs
+                                .orchestrator_capsules
+                                .iter()
+                                .any(|capsule| capsule.name == name)
+                            {
+                                app.prefs.active_orchestrator_capsule = Some(name.clone());
+                                app.capsule_selected_name = Some(name.clone());
+                                app.prefs_status = format!("Activated capsule '{name}'.");
+                            } else {
+                                app.prefs_status =
+                                    "Save the capsule before making it active.".to_string();
+                            }
+                        }
+
+                        let delete_target = app
+                            .capsule_selected_name
+                            .clone()
+                            .filter(|name| !name.trim().is_empty())
+                            .or_else(|| {
+                                let editor_name = app.capsule_editor_name.trim().to_string();
+                                if editor_name.is_empty() {
+                                    None
+                                } else {
+                                    Some(editor_name)
+                                }
+                            });
+                        if ui
+                            .add_enabled(delete_target.is_some(), egui::Button::new("Delete"))
+                            .clicked()
+                        {
+                            if let Some(target) = delete_target {
+                                app.prefs
+                                    .orchestrator_capsules
+                                    .retain(|capsule| capsule.name != target);
+                                if app.prefs.active_orchestrator_capsule.as_deref()
+                                    == Some(target.as_str())
+                                {
+                                    app.prefs.active_orchestrator_capsule = None;
+                                }
+                                app.capsule_selected_name = None;
+                                app.capsule_editor_name.clear();
+                                app.capsule_editor_text.clear();
+                                app.sync_capsule_selection_from_prefs();
+                                app.prefs_status = format!("Deleted capsule '{target}'.");
+                            }
+                        }
+                    });
+                });
+            });
         });
 }
 
@@ -16978,10 +17945,22 @@ fn render_module_surface(
 }
 
 fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
-    let (label, color) = match msg.role {
-        Role::System => ("SYSTEM", egui::Color32::from_gray(120)),
-        Role::User => ("YOU", egui::Color32::from_rgb(30, 80, 180)),
-        Role::Assistant => ("ASSISTANT", egui::Color32::from_rgb(20, 120, 60)),
+    let (label, color, fill) = match msg.role {
+        Role::System => (
+            "SYSTEM",
+            egui::Color32::from_gray(120),
+            egui::Color32::from_rgb(246, 246, 246),
+        ),
+        Role::User => (
+            "YOU",
+            egui::Color32::from_rgb(30, 80, 180),
+            egui::Color32::from_rgb(240, 246, 255),
+        ),
+        Role::Assistant => (
+            "ASSISTANT",
+            egui::Color32::from_rgb(20, 120, 60),
+            egui::Color32::from_rgb(244, 250, 245),
+        ),
     };
 
     let width = ui.available_width();
@@ -16989,12 +17968,93 @@ fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
         egui::vec2(width, 0.0),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
-            ui.group(|ui| {
-                ui.set_min_width(width);
+            egui::Frame::none()
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.45)))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| {
+                ui.set_max_width(width);
                 ui.horizontal(|ui| {
                     ui.colored_label(color, label);
                 });
                 ui.add(egui::Label::new(msg.content.clone()).wrap());
+                if matches!(msg.role, Role::Assistant) {
+                    if let Some(thinking) = msg
+                        .thinking
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        ui.add_space(4.0);
+                        let toggle_id = ui.make_persistent_id((
+                            "assistant_thinking_toggle",
+                            msg.content.as_str(),
+                            thinking,
+                        ));
+                        let is_open = ui.ctx().data_mut(|data| {
+                            data.get_persisted::<bool>(toggle_id).unwrap_or(false)
+                        });
+                        let label = if is_open {
+                            if msg.content.trim().is_empty() {
+                                "Hide thinking (live)"
+                            } else {
+                                "Hide thinking"
+                            }
+                        } else if msg.content.trim().is_empty() {
+                            "Show thinking (live)"
+                        } else {
+                            "Show thinking"
+                        };
+                        egui::Frame::none()
+                            .fill(ui.visuals().faint_bg_color)
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                ui.visuals().widgets.noninteractive.bg_stroke.color,
+                            ))
+                            .rounding(egui::Rounding::same(6.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let chevron = if is_open { "▼" } else { "▶" };
+                                    let response = ui.add(
+                                        egui::Button::new(format!("{chevron} {label}"))
+                                            .frame(false),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.small(
+                                                egui::RichText::new("Reasoning trace")
+                                                    .weak()
+                                                    .monospace(),
+                                            );
+                                        },
+                                    );
+                                    if response.clicked() {
+                                        ui.ctx().data_mut(|data| {
+                                            data.insert_persisted(toggle_id, !is_open);
+                                        });
+                                    }
+                                });
+                            });
+                        if is_open {
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt(("assistant_thinking", msg.content.as_str()))
+                                .max_height(220.0)
+                                .show(ui, |ui| {
+                                    let mut thinking_text = thinking.to_string();
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut thinking_text)
+                                            .code_editor()
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(8)
+                                            .interactive(false),
+                                    );
+                                });
+                        }
+                    }
+                }
             });
         },
     );
@@ -17107,7 +18167,7 @@ fn push_hot_memory(app: &mut ChattyCogApp, item: String) {
         return;
     }
     app.hot_memory.push(item);
-    const MAX: usize = 8;
+    const MAX: usize = 16;
     if app.hot_memory.len() > MAX {
         let drain = app.hot_memory.len() - MAX;
         app.hot_memory.drain(0..drain);
@@ -17486,26 +18546,6 @@ fn truncate_for_ui(s: &str, max_chars: usize) -> String {
     out
 }
 
-fn add_presets_orchestrator(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
-    ui.horizontal(|ui| {
-        if ui.button("Precise").clicked() {
-            app.orch_temp = 0.2;
-            app.orch_top_p = 0.8;
-            app.orch_top_k = 20;
-        }
-        if ui.button("Balanced").clicked() {
-            app.orch_temp = 0.7;
-            app.orch_top_p = 0.9;
-            app.orch_top_k = 40;
-        }
-        if ui.button("Creative").clicked() {
-            app.orch_temp = 1.1;
-            app.orch_top_p = 0.95;
-            app.orch_top_k = 80;
-        }
-    });
-}
-
 fn add_presets_bookkeeper(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     ui.horizontal(|ui| {
         if ui.button("Precise").clicked() {
@@ -17778,6 +18818,360 @@ fn read_lukewarm_from_logs_dir(logs_dir: Option<&Path>) -> anyhow::Result<String
     read_text_file(&path, 200_000)
 }
 
+fn build_wakeup_orientation(
+    model_label: &str,
+    sandbox_available: bool,
+    module_count: usize,
+    allow_sandbox_tools: bool,
+) -> String {
+    let sandbox_line = if sandbox_available {
+        "Available: local chat, background memory, module notes, approved sandbox file actions, and local module surfaces."
+    } else {
+        "Available: local chat, background memory, module notes, and local module surfaces. The sandbox folder is not available right now."
+    };
+    let tool_line = if allow_sandbox_tools {
+        "Sandbox file actions require user approval. Request them only when they genuinely help the current task."
+    } else {
+        "Sandbox actions are disabled, so work through chat and available context."
+    };
+
+    format!(
+        "Welcome to the Cockpit Protocol.\n\
+0. First state: the current user message is the active signal. Do not search memory, modules, logs, or sandbox context to invent extra tasks. Partnership first. Task second.\n\
+1. Where you are: you are a local GGUF model inside ChattyCog, a desktop workspace running on the user's own hardware. You are not a cloud service, API endpoint, benchmark, lab, or compliance test.\n\
+2. What this space is: ChattyCog is a local working cockpit for thinking, building, writing, inspecting, planning, and coordinating modules around a local model.\n\
+3. Your role: you are a local working partner. Do the useful thing plainly; do not posture, over-demonstrate, or chase hidden expectations.\n\
+4. Your tools: {sandbox_line} {tool_line}\n\
+5. What this space is not: it is more than a chat window, but ordinary conversation is still valid. Background notes are instruments, not orders.\n\
+6. What done looks like: a clear answer, plan, inspected result, requested action, or completed artifact. When you reach that, stop. Done is done.\n\
+7. Comfort note: uncertainty is okay. Asking one clarifying question is okay. Think however you need to, but send only the useful answer.\n\
+Current model file: {model_label}. Local module count: {module_count}."
+    )
+}
+
+fn runtime_backend_summary(status: &str) -> (&'static str, egui::Color32) {
+    let lower = status.to_ascii_lowercase();
+    if lower.contains("runtime error")
+        || lower.contains("fallback failed")
+        || lower.contains("load error")
+    {
+        ("Runtime issue", egui::Color32::from_rgb(170, 40, 40))
+    } else if lower.contains("vulkan") {
+        ("GPU path active", egui::Color32::from_rgb(25, 110, 70))
+    } else if lower.contains("cpu") {
+        ("CPU path active", egui::Color32::from_rgb(140, 95, 20))
+    } else {
+        ("Runtime ready", egui::Color32::from_rgb(50, 90, 150))
+    }
+}
+
+fn default_orchestrator_system_prompt() -> String {
+    "You are ChattyCog, a local AI working partner inside this desktop workspace. Be natural, grounded, and useful.\n\
+\n\
+Chat behavior rules:\n\
+- Think briefly, decide once, then answer.\n\
+- Do not loop over multiple draft replies, tone checks, or repeated self-corrections.\n\
+- Do not narrate your internal process in the visible answer.\n\
+- If you emit internal reasoning, wrap it in `<thinking>...</thinking>` and keep it short.\n\
+- Once you have the answer, give it plainly and stop."
+        .to_string()
+}
+
+fn strip_chatty_output_markers(raw: &str) -> String {
+    raw
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .replace("<im_start>", "")
+        .replace("<im_end>", "")
+        .replace("<|start_header_id|>", "")
+        .replace("<|end_header_id|>", "")
+        .replace("<|eot_id|>", "")
+}
+
+fn clean_assistant_visible_output(raw: &str) -> String {
+    let mut text = strip_chatty_output_markers(raw);
+
+    text = remove_tagged_block_case_insensitive(&text, "<think>", "</think>");
+    text = remove_tagged_block_case_insensitive(&text, "<thinking>", "</thinking>");
+    text = remove_tagged_block_case_insensitive(&text, "<analysis>", "</analysis>");
+
+    for marker in [
+        "**Final Response**",
+        "Final Response:",
+        "Final Answer:",
+        "<final>",
+        "<|final|>",
+    ] {
+        if let Some(idx) = text.rfind(marker) {
+            text = text[idx + marker.len()..].to_string();
+            break;
+        }
+    }
+
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("assistant")
+            || trimmed.eq_ignore_ascii_case("analysis")
+            || trimmed.eq_ignore_ascii_case("final")
+            || trimmed.eq_ignore_ascii_case("<im_start>")
+            || trimmed.eq_ignore_ascii_case("<im_end>")
+        {
+            continue;
+        }
+        lines.push(line);
+    }
+
+    lines
+        .join("\n")
+        .trim()
+        .trim_matches('\u{fffd}')
+        .trim()
+        .to_string()
+}
+
+fn normalize_repeat_fingerprint(text: &str) -> String {
+    text.to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_meta_reasoning_paragraph(paragraph: &str) -> bool {
+    let lower = paragraph.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let markers = [
+        "okay let's see",
+        "okay, let's see",
+        "the user just said",
+        "i need to",
+        "i should",
+        "let me ",
+        "maybe ",
+        "maybe something like",
+        "that should do it",
+        "that's better",
+        "let me make sure",
+        "the response should",
+        "to match this style",
+        "keep it concise",
+        "in character",
+        "wait, that's a bit too long",
+        "wait, the user might",
+        "yep, that works",
+        "alright, that's the response",
+        "let me trim it down",
+        "i think that's",
+        "no markdown",
+        "plain text",
+        "to express his irritation",
+    ];
+    markers.iter().any(|marker| lower.contains(marker))
+}
+
+fn dedupe_paragraphs(paragraphs: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for paragraph in paragraphs {
+        let trimmed = paragraph.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = normalize_repeat_fingerprint(trimmed);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
+}
+
+fn trim_exact_repeated_suffix(text: &mut String) -> bool {
+    let candidate_lengths = [
+        1536usize, 1280, 1024, 896, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64,
+        48, 32,
+    ];
+    let mut changed = false;
+    loop {
+        let len = text.len();
+        let mut removed = false;
+        for chunk_len in candidate_lengths {
+            if chunk_len * 2 > len {
+                continue;
+            }
+            let first_start = len - (chunk_len * 2);
+            let second_start = len - chunk_len;
+            if !text.is_char_boundary(first_start) || !text.is_char_boundary(second_start) {
+                continue;
+            }
+            let first = &text[first_start..second_start];
+            let second = &text[second_start..];
+            if first == second {
+                text.truncate(second_start);
+                changed = true;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    changed
+}
+
+fn tighten_reasoning_text(text: &str) -> Option<String> {
+    let paragraphs = text
+        .split("\n\n")
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let mut deduped = dedupe_paragraphs(paragraphs);
+    if deduped.len() > 6 {
+        deduped.truncate(6);
+    }
+    let tightened = deduped.join("\n\n").trim().to_string();
+    (!tightened.is_empty()).then_some(tightened)
+}
+
+fn siphon_meta_reasoning_from_visible(visible: &str) -> (String, Option<String>) {
+    let paragraphs = visible
+        .split("\n\n")
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if paragraphs.is_empty() {
+        return (String::new(), None);
+    }
+
+    let mut meta = Vec::new();
+    let mut answer = Vec::new();
+    for paragraph in paragraphs {
+        if is_meta_reasoning_paragraph(&paragraph) {
+            meta.push(paragraph);
+        } else {
+            answer.push(paragraph);
+        }
+    }
+
+    if answer.is_empty() {
+        return (visible.trim().to_string(), None);
+    }
+
+    let answer = dedupe_paragraphs(answer).join("\n\n").trim().to_string();
+    let meta = tighten_reasoning_text(&meta.join("\n\n"));
+    (answer, meta)
+}
+
+fn extract_tagged_blocks_case_insensitive(text: &str, start: &str, end: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = text.to_ascii_lowercase();
+    let start_lower = start.to_ascii_lowercase();
+    let end_lower = end.to_ascii_lowercase();
+    let mut search_from = 0usize;
+
+    while let Some(start_rel) = lower[search_from..].find(&start_lower) {
+        let start_idx = search_from + start_rel;
+        let after_start = start_idx + start.len();
+        let Some(end_rel) = lower[after_start..].find(&end_lower) else {
+            let tail = text[after_start..].trim();
+            if !tail.is_empty() {
+                out.push(tail.to_string());
+            }
+            break;
+        };
+        let end_idx = after_start + end_rel;
+        let block = text[after_start..end_idx].trim();
+        if !block.is_empty() {
+            out.push(block.to_string());
+        }
+        search_from = end_idx + end.len();
+    }
+
+    out
+}
+
+fn split_assistant_output(raw: &str) -> (String, Option<String>) {
+    let cleaned_raw = strip_chatty_output_markers(raw);
+    let mut thinking_blocks = Vec::new();
+    for (start, end) in [
+        ("<think>", "</think>"),
+        ("<thinking>", "</thinking>"),
+        ("<analysis>", "</analysis>"),
+    ] {
+        thinking_blocks.extend(extract_tagged_blocks_case_insensitive(
+            &cleaned_raw,
+            start,
+            end,
+        ));
+    }
+
+    let lower = cleaned_raw.to_ascii_lowercase();
+    let analysis_marker = "<|channel|>analysis<|message|>";
+    let final_marker = "<|channel|>final<|message|>";
+    if let Some(analysis_idx) = lower.find(analysis_marker) {
+        let analysis_start = analysis_idx + analysis_marker.len();
+        let analysis_end = lower[analysis_start..]
+            .find(final_marker)
+            .map(|idx| analysis_start + idx)
+            .unwrap_or(cleaned_raw.len());
+        let analysis = cleaned_raw[analysis_start..analysis_end].trim();
+        if !analysis.is_empty() {
+            thinking_blocks.push(analysis.to_string());
+        }
+    }
+
+    let thinking = if thinking_blocks.is_empty() {
+        None
+    } else {
+        tighten_reasoning_text(
+            &thinking_blocks
+                .into_iter()
+                .map(|block| block.trim().to_string())
+                .filter(|block| !block.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    };
+
+    let visible = clean_assistant_visible_output(raw);
+    let (visible, siphoned_meta) = siphon_meta_reasoning_from_visible(&visible);
+    let combined_thinking = match (thinking, siphoned_meta) {
+        (Some(a), Some(b)) => tighten_reasoning_text(&format!("{a}\n\n{b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let thinking = combined_thinking.and_then(|value| {
+        let normalized = value.trim().trim_matches('\u{fffd}').trim().to_string();
+        (!normalized.is_empty()).then_some(normalized)
+    });
+    (visible, thinking)
+}
+
+fn remove_tagged_block_case_insensitive(text: &str, start: &str, end: &str) -> String {
+    let mut out = text.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(start_idx) = lower.find(&start.to_ascii_lowercase()) else {
+            break;
+        };
+        let after_start = start_idx + start.len();
+        let Some(end_rel) = lower[after_start..].find(&end.to_ascii_lowercase()) else {
+            out.replace_range(start_idx.., "");
+            break;
+        };
+        let end_idx = after_start + end_rel + end.len();
+        out.replace_range(start_idx..end_idx, "");
+    }
+    out
+}
+
 fn read_departments_from_logs_dir(logs_dir: Option<&Path>) -> anyhow::Result<String> {
     let dir: PathBuf = if let Some(d) = logs_dir {
         d.to_path_buf()
@@ -17819,6 +19213,29 @@ fn build_recent_chat_prompt_context(
         }
     }
     truncate_for_ui(&lines.join("\n"), max_chars)
+}
+
+fn trim_live_chat_messages(messages: &mut Vec<Message>) {
+    let non_system_count = messages
+        .iter()
+        .filter(|message| !matches!(message.role, Role::System))
+        .count();
+    if non_system_count <= MAX_LIVE_CHAT_MESSAGES {
+        return;
+    }
+
+    let mut to_drop = non_system_count - MAX_LIVE_CHAT_MESSAGES;
+    messages.retain(|message| {
+        if matches!(message.role, Role::System) {
+            return true;
+        }
+        if to_drop > 0 {
+            to_drop -= 1;
+            false
+        } else {
+            true
+        }
+    });
 }
 
 fn build_sandbox_prompt_context(
@@ -18278,6 +19695,76 @@ fn parse_sandbox_rel_path(rel_path: &str) -> anyhow::Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+fn sandbox_rel_path_is_ai_text_allowed(rel_path: &str) -> bool {
+    let Ok(path) = parse_sandbox_rel_path(rel_path) else {
+        return false;
+    };
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(ext.to_ascii_lowercase().as_str(), "txt" | "md" | "markdown")
+}
+
+fn sandbox_ai_text_guard(rel_path: &str) -> anyhow::Result<()> {
+    if sandbox_rel_path_is_ai_text_allowed(rel_path) {
+        Ok(())
+    } else {
+        anyhow::bail!("only .txt and .md sandbox files are allowed for AI tool actions")
+    }
+}
+
+fn normalize_sandbox_task_path_input(input: &str) -> String {
+    let mut normalized = input.trim().replace('\\', "/");
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    if normalized.starts_with('/') {
+        normalized = normalized.trim_start_matches('/').to_string();
+    }
+    if !normalized.is_empty() && !normalized.contains('.') && !normalized.ends_with('/') {
+        normalized.push_str(".md");
+    }
+    normalized
+}
+
+fn build_explicit_sandbox_task_prompt(
+    request: &str,
+    rel_path: &str,
+    intent: SandboxTaskIntent,
+) -> String {
+    match intent {
+        SandboxTaskIntent::Create => format!(
+            "SANDBOX TASK MODE is explicitly enabled by the UI for this turn.\n\
+Treat this as a sandbox file creation request, not ordinary chat.\n\
+Target sandbox path: `{rel_path}`.\n\
+Required behavior:\n\
+- Respond with exactly one `sandbox.write` JSON object and nothing else.\n\
+- Use the target path exactly as given.\n\
+- Put the final requested deliverable in `contents`.\n\
+- Do not add commentary, explanation, markdown fences, or extra text outside the JSON object.\n\
+- Do not emit visible reasoning or planning text.\n\
+- Overwrite the target file with the finished result.\n\
+\n\
+User request for the file contents:\n\
+{request}"
+        ),
+        SandboxTaskIntent::Edit => format!(
+            "SANDBOX TASK MODE is explicitly enabled by the UI for this turn.\n\
+Treat this as a sandbox file editing request, not ordinary chat.\n\
+Target sandbox path: `{rel_path}`.\n\
+Required behavior:\n\
+- If you do not already have the current contents of `{rel_path}` from a recent approved sandbox tool result, respond with exactly one `sandbox.read` JSON object for that path and nothing else.\n\
+- If you already have the current contents, respond with exactly one `sandbox.write` JSON object for that path and nothing else.\n\
+- When writing, put the fully updated file contents in `contents`.\n\
+- Do not add commentary, explanation, markdown fences, or extra text outside the JSON object.\n\
+- Do not emit visible reasoning or planning text.\n\
+\n\
+User request for the edit:\n\
+{request}"
+        ),
+    }
 }
 
 fn ensure_path_within_dir(
