@@ -16,13 +16,13 @@
   "ai_mode": "Local allowed",
   "teacher_override": false,
   "host_device_id": "chattycog-desktop-2s8v68v-6912-1776210127564",
-  "host_device_name": "ChattyCog on DESKTOP-2S8V68V (17192)",
+  "host_device_name": "ChattyCog on DESKTOP-2S8V68V (1316)",
   "turn_holder_device_id": "",
   "turn_holder_device_name": "",
   "connected_peer_count": 0,
   "participant_count": 1,
   "local_device_id": "chattycog-desktop-2s8v68v-6912-1776210127564",
-  "local_device_name": "ChattyCog on DESKTOP-2S8V68V (17192)",
+  "local_device_name": "ChattyCog on DESKTOP-2S8V68V (1316)",
   "local_is_host": true,
   "local_has_turn": true,
   "host_activity_state": "",
@@ -31,11 +31,11 @@
   "participants": [
     {
       "device_id": "chattycog-desktop-2s8v68v-6912-1776210127564",
-      "device_name": "ChattyCog on DESKTOP-2S8V68V (17192)",
+      "device_name": "ChattyCog on DESKTOP-2S8V68V (1316)",
       "is_local": true,
       "connected": true
     }
   ],
-  "summary": "Open | AI Local allowed | General room | Host ChattyCog on DESKTOP-2S8V68V (17192)",
-  "updated_at_unix_ms": 1777864134792
+  "summary": "Open | AI Local allowed | General room | Host ChattyCog on DESKTOP-2S8V68V (1316)",
+  "updated_at_unix_ms": 1778387000083
 }

@@ -32,7 +32,9 @@ use chattycog_gui::module_registry::{
     ModuleManifest, ModuleNetworkAssetLane, ModuleNetworkFeature, ModuleRegistry,
 };
 use chattycog_gui::networking::{BlockedPeer, NetworkController, ReceivedArtifact, TrustedPeer};
-use chattycog_gui::preferences::{self, AppPreferences, GenParams, ModulePreferences, PromptCapsule};
+use chattycog_gui::preferences::{
+    self, AppPreferences, GenParams, ModulePreferences, PromptCapsule, VisionRoutingMode,
+};
 use crossbeam_channel::Receiver;
 use ecg_window::EcgWindowState;
 use eframe::egui;
@@ -107,6 +109,12 @@ impl SandboxTaskIntent {
             Self::Edit => "edit",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxReferenceKind {
+    Text,
+    Image,
 }
 
 #[derive(Debug, Clone)]
@@ -559,6 +567,10 @@ enum SandboxAction {
     Read {
         path: String,
     },
+    InspectImage {
+        path: String,
+        question: String,
+    },
     List,
     Ledger {
         status: String,
@@ -584,6 +596,14 @@ const DEFAULT_SANDBOX_TASK_LEDGER_REL_PATH: &str = "scratchpad/task_ledger.md";
 struct ModelOption {
     label: String,
     value: String, // stored in prefs; either a filename or "modules/<module_id>/<file>.gguf"
+}
+
+#[derive(Debug, Clone)]
+struct VisionModelBinding {
+    model_path: PathBuf,
+    mmproj_path: PathBuf,
+    label: String,
+    source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -1290,6 +1310,7 @@ struct ChattyCogApp {
     sandbox_task_enabled: bool,
     sandbox_task_intent: SandboxTaskIntent,
     sandbox_task_path: String,
+    chat_sandbox_reference_path: String,
 
     // Modules
     modules_dir: Option<PathBuf>,
@@ -1455,6 +1476,7 @@ impl ChattyCogApp {
             sandbox_task_enabled: false,
             sandbox_task_intent: SandboxTaskIntent::Create,
             sandbox_task_path: "notes/".to_string(),
+            chat_sandbox_reference_path: String::new(),
             modules_dir: find_modules_dir(),
             module_registry: ModuleRegistry::scan(find_modules_dir()),
             module_state_notes: HashMap::new(),
@@ -1663,6 +1685,185 @@ impl ChattyCogApp {
             }
         } else {
             self.runtime_status = "Runtime: no GGUF selected".to_string();
+        }
+    }
+
+    fn all_vision_search_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(models_dir) = &self.models_dir {
+            dirs.push(models_dir.clone());
+        }
+        if let Some(vision_parts_dir) = find_vision_parts_dir() {
+            dirs.push(vision_parts_dir);
+        }
+        dirs
+    }
+
+    fn detect_mmproj_for_model(&self, model_path: &Path) -> Option<PathBuf> {
+        let model_name = model_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())?;
+        let candidate_patterns: &[&[&str]] = if model_name.contains("qwen2.5-vl") {
+            &[&["mmproj", "qwen2.5-vl"]]
+        } else if model_name.contains("llava") {
+            &[&["llava", "mmproj"], &["mmproj", "llava"]]
+        } else {
+            &[&["mmproj"]]
+        };
+
+        for dir in self.all_vision_search_dirs() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for ent in rd.flatten() {
+                let path = ent.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().map(|value| value.to_string_lossy().to_ascii_lowercase()) else {
+                    continue;
+                };
+                if !name.ends_with(".gguf") {
+                    continue;
+                }
+                if candidate_patterns
+                    .iter()
+                    .any(|parts| parts.iter().all(|part| name.contains(part)))
+                {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn active_model_vision_binding(&self) -> Option<VisionModelBinding> {
+        let model_path = self.gguf_path.clone()?;
+        let mmproj_path = self.detect_mmproj_for_model(&model_path)?;
+        let label = model_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| model_path.display().to_string());
+        Some(VisionModelBinding {
+            model_path,
+            mmproj_path,
+            label,
+            source: "active multimodal model",
+        })
+    }
+
+    fn fallback_vision_binding(&self) -> Option<VisionModelBinding> {
+        let candidates = [
+            ("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf", "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf", "Qwen2.5-VL-7B fallback"),
+            ("llava-v1.5-7b-Q4_K_M.gguf", "llava-v1.5-7b-mmproj-model-f16.gguf", "LLaVA v1.5 7B fallback"),
+        ];
+        for dir in self.all_vision_search_dirs() {
+            for (model_name, mmproj_name, label) in candidates {
+                let model_path = dir.join(model_name);
+                let mmproj_path = dir.join(mmproj_name);
+                if model_path.is_file() && mmproj_path.is_file() {
+                    return Some(VisionModelBinding {
+                        model_path,
+                        mmproj_path,
+                        label: label.to_string(),
+                        source: "dedicated fallback model",
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn preferred_vision_binding(&self) -> Option<VisionModelBinding> {
+        match self.prefs.vision_routing_mode {
+            VisionRoutingMode::Auto | VisionRoutingMode::PreferActive => self
+                .active_model_vision_binding()
+                .or_else(|| self.fallback_vision_binding()),
+            VisionRoutingMode::ForceFallback => self
+                .fallback_vision_binding()
+                .or_else(|| self.active_model_vision_binding()),
+        }
+    }
+
+    fn available_chat_sandbox_reference_paths(&self) -> Vec<String> {
+        let Some(dir) = self.sandbox_dir.as_deref() else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        for path in list_sandbox_files(dir) {
+            let Ok(rel) = path.strip_prefix(dir) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if sandbox_reference_kind(&rel).is_some() {
+                items.push(rel);
+            }
+        }
+        items.sort();
+        items
+    }
+
+    fn prepare_chat_sandbox_reference_prompt(
+        &self,
+        user_request: &str,
+        rel_path: &str,
+    ) -> anyhow::Result<(String, SandboxReferenceKind)> {
+        let dir = self
+            .sandbox_dir
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("sandbox folder not found"))?;
+        let rel = parse_sandbox_rel_path(rel_path)?;
+        let abs = ensure_path_within_dir(dir, &dir.join(&rel))?;
+        let rel_display = rel.to_string_lossy().replace('\\', "/");
+        let kind = sandbox_reference_kind(&rel_display)
+            .ok_or_else(|| anyhow::anyhow!("selected sandbox reference must be a supported text or image file"))?;
+
+        match kind {
+            SandboxReferenceKind::Text => {
+                let text = sanitize_prompt_text(&read_text_file(&abs, 60_000)?);
+                let prompt = format!(
+                    "The user explicitly selected the sandbox file `Chatty_Sandbox/{rel_display}` from the chat UI for this turn.\n\
+Treat it as already-approved reference context and answer the user's request directly.\n\
+Do not ask the user to point you at the file again.\n\
+\n\
+Selected sandbox file: `Chatty_Sandbox/{rel_display}`\n\
+File contents:\n\
+{text}\n\
+\n\
+User request about this file:\n\
+{user_request}"
+                );
+                Ok((prompt, kind))
+            }
+            SandboxReferenceKind::Image => {
+                let runtime_dir = find_runtime_windows_dir()?;
+                let binding = self.preferred_vision_binding().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no multimodal model is ready; add a multimodal GGUF + matching mmproj in models/"
+                    )
+                })?;
+                let vision_result = sanitize_prompt_text(&run_vision_inspection(
+                    &runtime_dir,
+                    &binding,
+                    &abs,
+                    user_request,
+                )?);
+                let prompt = format!(
+                    "The user explicitly selected the sandbox image `Chatty_Sandbox/{rel_display}` from the chat UI for this turn.\n\
+Treat the image inspection result below as already-approved reference context and answer the user's request directly.\n\
+Do not ask the user to point you at the image again.\n\
+\n\
+Selected sandbox image: `Chatty_Sandbox/{rel_display}`\n\
+Image inspection model: {} ({})\n\
+Image inspection result:\n\
+{}\n\
+\n\
+User request about this image:\n\
+{}",
+                    binding.label, binding.source, vision_result, user_request
+                );
+                Ok((prompt, kind))
+            }
         }
     }
 
@@ -7011,7 +7212,9 @@ impl ChattyCogApp {
 You cannot read or write files directly, but you can request sandbox actions for the user to approve.\n\
 The persistent working scratchpad lives at `scratchpad/current.md` inside `Chatty_Sandbox/`.\n\
 AI sandbox file actions are limited to plain text notes only: `.txt` and `.md` files.\n\
+Sandbox image inspection is available as a read-only tool for common image files like `.png`, `.jpg`, `.jpeg`, and `.webp`.\n\
 Only request sandbox actions when they are useful for the user's current request. Do not emit tool JSON during ordinary conversation, greetings, or orientation unless the user asks you to inspect or update files.\n\
+If the user asks about a screenshot, photo, drawing, whiteboard, or diagram that lives in the sandbox, prefer `sandbox.inspect_image` instead of guessing from the filename.\n\
 Use the scratchpad to keep durable notes, extracted facts, intermediate plans, and reminders that should survive context-window pressure when the current task benefits from that.\n\
 The structured task ledger lives at `scratchpad/task_ledger.md` and is the best place to keep the current task, next step, open questions, and files touched.\n\
 For longer tasks, update the task ledger whenever the plan meaningfully changes.\n\
@@ -7020,6 +7223,7 @@ When you do need sandbox help, output one or more JSON objects, each on its own 
   {\"tool\":\"sandbox.write\",\"path\":\"notes/Ready.md\",\"contents\":\"...\"}\n\
   {\"tool\":\"sandbox.append\",\"path\":\"scratchpad/current.md\",\"contents\":\"\\n- new note\"}\n\
   {\"tool\":\"sandbox.read\",\"path\":\"notes/Ready.md\"}\n\
+  {\"tool\":\"sandbox.inspect_image\",\"path\":\"images/diagram.png\",\"question\":\"Describe the diagram and answer the user's question about it.\"}\n\
   {\"tool\":\"sandbox.list\"}\n\
   {\"tool\":\"sandbox.ledger\",\"status\":\"active\",\"current_task\":\"...\",\"next_step\":\"...\",\"open_questions\":[\"...\"],\"files_touched\":[\"notes/brief.md\"],\"notes\":[\"...\"]}\n\
   {\"tool\":\"sandbox.preload\",\"paths\":[\"notes/brief.md\",\"plans/today.md\"],\"include_list\":true,\"include_scratchpad\":true,\"include_ledger\":true,\"note\":\"load planning context first\"}\n\
@@ -7029,6 +7233,8 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
             system.push_str("\n### SANDBOX TOOL POLICY\nSandbox tool requests are disabled. Do not request file operations.\n");
         }
 
+        let system = sanitize_prompt_text(&system);
+        let prompt = sanitize_prompt_text(&prompt);
         std::thread::spawn(move || {
             if gguf.is_none() {
                 let _ = tx.send(GenEvent::Error(
@@ -7205,6 +7411,7 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         struct ToolReq {
             tool: String,
             path: Option<String>,
+            question: Option<String>,
             paths: Option<Vec<String>>,
             contents: Option<String>,
             include_list: Option<bool>,
@@ -7242,6 +7449,13 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                 "sandbox.read" => {
                     let path = req.path?;
                     Some(SandboxAction::Read { path })
+                }
+                "sandbox.inspect_image" => {
+                    let path = req.path?;
+                    Some(SandboxAction::InspectImage {
+                        path,
+                        question: req.question.unwrap_or_default().trim().to_string(),
+                    })
                 }
                 "sandbox.list" => Some(SandboxAction::List),
                 "sandbox.ledger" => Some(SandboxAction::Ledger {
@@ -7797,7 +8011,8 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
             match action {
                 SandboxAction::Write { path, .. }
                 | SandboxAction::Append { path, .. }
-                | SandboxAction::Read { path } => {
+                | SandboxAction::Read { path }
+                | SandboxAction::InspectImage { path, .. } => {
                     if !path.trim().is_empty() {
                         paths.push(path.trim().to_string());
                     }
@@ -7895,6 +8110,7 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         let mut status_lines = Vec::new();
         let mut result_lines = Vec::new();
         let mut last_opened: Option<PathBuf> = None;
+        let preferred_vision_binding = self.preferred_vision_binding();
         for action in self.pending_sandbox_actions.drain(..) {
             match action {
                 SandboxAction::Write { path, contents } => {
@@ -7945,6 +8161,64 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     }
                     Err(e) => status_lines.push(format!("Read blocked/failed ({path}): {e}")),
                 },
+                SandboxAction::InspectImage { path, question } => {
+                    match sandbox_ai_image_guard(&path)
+                        .and_then(|_| parse_sandbox_rel_path(&path))
+                        .and_then(|rel| ensure_path_within_dir(&dir, &dir.join(rel)))
+                    {
+                        Ok(image_path) => {
+                            let runtime_dir = match find_runtime_windows_dir() {
+                                Ok(path) => path,
+                                Err(err) => {
+                                    status_lines.push(format!(
+                                        "Image inspect failed ({path}): runtime not found ({err:#})"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let Some(binding) = preferred_vision_binding.clone() else {
+                                status_lines.push(
+                                    "Image inspect failed: no multimodal model/mmproj pair was found in the active chat model, `models/`, or `vision-parts/`."
+                                        .to_string(),
+                                );
+                                continue;
+                            };
+                            match run_vision_inspection(&runtime_dir, &binding, &image_path, &question) {
+                                Ok(result) => {
+                                    let rel = image_path
+                                        .strip_prefix(&dir)
+                                        .unwrap_or(&image_path)
+                                        .to_string_lossy()
+                                        .replace('\\', "/");
+                                    status_lines.push(format!(
+                                        "Inspected image {rel} via {} ({})",
+                                        binding.label, binding.source
+                                    ));
+                                    let question_line = if question.trim().is_empty() {
+                                        "Question: (general image inspection)".to_string()
+                                    } else {
+                                        format!("Question: {}", question.trim())
+                                    };
+                                    result_lines.push(format!(
+                                        "sandbox.inspect_image `{rel}` succeeded.\nModel: {} ({})\n{}\nVision result:\n{}",
+                                        binding.label,
+                                        binding.source,
+                                        question_line,
+                                        result.trim()
+                                    ));
+                                }
+                                Err(err) => {
+                                    status_lines.push(format!(
+                                        "Image inspect failed ({path}): {err}"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            status_lines.push(format!("Image inspect blocked/failed ({path}): {err}"));
+                        }
+                    }
+                }
                 SandboxAction::List => match sandbox_list(&dir) {
                     Ok(items) => {
                         let preview = if items.is_empty() {
@@ -9598,6 +9872,9 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
                     }
                     ui.small(format!("Chat max tokens: {}", app.orch_max_tokens));
                 });
+                let active_vision_binding = app.active_model_vision_binding();
+                let fallback_vision_binding = app.fallback_vision_binding();
+
                 ui.horizontal_wrapped(|ui| {
                     if let Some(capsule) = app.active_orchestrator_capsule() {
                         let preview = truncate_for_ui(&one_line(&capsule.text, 120), 88);
@@ -9612,6 +9889,37 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
                         ui.small("Voice: native ChattyCog");
                         ui.small("No capsule selected.");
                     }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    match (&active_vision_binding, &fallback_vision_binding) {
+                        (Some(binding), _) => {
+                            let label = truncate_for_ui(&binding.label, 52);
+                            let route_prefix = if app.prefs.vision_routing_mode
+                                == VisionRoutingMode::ForceFallback
+                            {
+                                "Image inspection: active model available"
+                            } else {
+                                "Image inspection: active model ready"
+                            };
+                            ui.small(format!("{route_prefix} ({label})"));
+                            ui.small("Sandbox can inspect .png/.jpg/.jpeg/.webp files.");
+                        }
+                        (None, Some(binding)) => {
+                            let label = truncate_for_ui(&binding.label, 52);
+                            ui.small(format!(
+                                "Image inspection: fallback helper ready ({label})"
+                            ));
+                            ui.small("Active chat model is text-only, but sandbox image reads can still work.");
+                        }
+                        (None, None) => {
+                            ui.small("Image inspection: unavailable");
+                            ui.small("Add a multimodal GGUF + matching mmproj to enable sandbox image reads.");
+                        }
+                    }
+                    ui.small(format!(
+                        "Mode: {}",
+                        vision_routing_mode_label(app.prefs.vision_routing_mode)
+                    ));
                 });
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -9688,12 +9996,85 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
             ui.add_space(4.0);
         }
 
+        let sandbox_reference_options = app.available_chat_sandbox_reference_paths();
+        if !sandbox_reference_options.is_empty() {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.small("Sandbox reference:");
+                    let selected_reference_label =
+                        if app.chat_sandbox_reference_path.trim().is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            app.chat_sandbox_reference_path.clone()
+                        };
+                    egui::ComboBox::from_id_salt("chat_sandbox_reference_combo")
+                        .selected_text(truncate_for_ui(&selected_reference_label, 56))
+                        .width(360.0)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    app.chat_sandbox_reference_path.trim().is_empty(),
+                                    "(none)",
+                                )
+                                .clicked()
+                            {
+                                app.chat_sandbox_reference_path.clear();
+                            }
+                            for rel in &sandbox_reference_options {
+                                let selected = app.chat_sandbox_reference_path == *rel;
+                                if ui.selectable_label(selected, rel).clicked() {
+                                    app.chat_sandbox_reference_path = rel.clone();
+                                }
+                            }
+                        });
+                    if ui.button("Use open file").clicked() {
+                        if let (Some(dir), Some(path)) =
+                            (app.sandbox_dir.as_deref(), app.sandbox_editor_path.as_deref())
+                        {
+                            if let Ok(rel) = path.strip_prefix(dir) {
+                                let rel = rel.to_string_lossy().replace('\\', "/");
+                                if sandbox_reference_kind(&rel).is_some() {
+                                    app.chat_sandbox_reference_path = rel;
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Clear reference").clicked() {
+                        app.chat_sandbox_reference_path.clear();
+                    }
+                });
+                if !app.chat_sandbox_reference_path.trim().is_empty() {
+                    let helper = match sandbox_reference_kind(&app.chat_sandbox_reference_path) {
+                        Some(SandboxReferenceKind::Image) => {
+                            "Selected image will be inspected directly before the reply, so the AI does not need to guess the path."
+                        }
+                        Some(SandboxReferenceKind::Text) => {
+                            "Selected text file will be loaded directly into the next prompt as already-approved sandbox context."
+                        }
+                        None => {
+                            "Selected sandbox reference is not a supported text or image file."
+                        }
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(helper);
+                    });
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(
+                            "Pick a sandbox image or text file here when you want the next turn to use a specific item directly.",
+                        );
+                    });
+                }
+            });
+            ui.add_space(4.0);
+        }
+
         ui.group(|ui| {
             let sandbox_mode_available =
                 app.prefs.allow_sandbox_tool_requests && app.sandbox_dir.is_some();
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut app.sandbox_task_enabled, "Sandbox task");
-                ui.small("Mark this turn as a sandbox file request so the model skips the guesswork.");
+                ui.small("Use this only for sandbox file creation/editing requests so the model skips the guesswork.");
             });
             if app.sandbox_task_enabled {
                 ui.add_space(4.0);
@@ -9759,6 +10140,16 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
                         SandboxAction::Write { path, .. } => ui.label(format!("- write: {path}")),
                         SandboxAction::Append { path, .. } => ui.label(format!("- append: {path}")),
                         SandboxAction::Read { path } => ui.label(format!("- read: {path}")),
+                        SandboxAction::InspectImage { path, question } => {
+                            if question.trim().is_empty() {
+                                ui.label(format!("- inspect image: {path}"))
+                            } else {
+                                ui.label(format!(
+                                    "- inspect image: {path} | question: {}",
+                                    truncate_for_ui(question.trim(), 90)
+                                ))
+                            }
+                        }
                         SandboxAction::List => ui.label("- list".to_string()),
                         SandboxAction::Preload {
                             paths,
@@ -9972,8 +10363,9 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
         if !content.is_empty() {
             let sandbox_path = normalize_sandbox_task_path_input(&app.sandbox_task_path);
             let sandbox_mode_active = app.sandbox_task_enabled;
+            let selected_sandbox_reference = app.chat_sandbox_reference_path.trim().to_string();
             let mut generation_prompt = content.clone();
-            let visible_user_message = if sandbox_mode_active {
+            let mut visible_user_message = if sandbox_mode_active {
                 format!(
                     "[Sandbox {} -> {}] {}",
                     app.sandbox_task_intent.label(),
@@ -10016,6 +10408,32 @@ fn chat_tab(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ChattyCogApp) {
                     &sandbox_path,
                     app.sandbox_task_intent,
                 );
+            } else if !selected_sandbox_reference.is_empty() {
+                match app.prepare_chat_sandbox_reference_prompt(&content, &selected_sandbox_reference)
+                {
+                    Ok((prompt, kind)) => {
+                        generation_prompt = prompt;
+                        let label = match kind {
+                            SandboxReferenceKind::Text => "Sandbox File",
+                            SandboxReferenceKind::Image => "Sandbox Image",
+                        };
+                        app.sandbox_action_status = format!(
+                            "Using selected sandbox {} `{}` as direct context for this turn.",
+                            label.to_ascii_lowercase(),
+                            selected_sandbox_reference
+                        );
+                        visible_user_message = format!(
+                            "[{label} -> {}] {}",
+                            selected_sandbox_reference, content
+                        );
+                    }
+                    Err(err) => {
+                        app.sandbox_action_status =
+                            format!("Sandbox reference could not be prepared: {err}");
+                        ctx.request_repaint();
+                        return;
+                    }
+                }
             }
             if let Err(reason) = app.shared_chat_can_send_mirrored_main_chat_message() {
                 app.networking_status = format!("Shared room: {reason}");
@@ -10419,6 +10837,26 @@ fn models_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                     ui.small(
                         "If disabled, Chat tab won't parse tool JSON requests and will hide the approval panel.",
                     );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Vision routing");
+                        egui::ComboBox::from_id_salt("vision_routing_mode")
+                            .selected_text(vision_routing_mode_label(app.prefs.vision_routing_mode))
+                            .show_ui(ui, |ui| {
+                                for mode in [
+                                    VisionRoutingMode::Auto,
+                                    VisionRoutingMode::PreferActive,
+                                    VisionRoutingMode::ForceFallback,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut app.prefs.vision_routing_mode,
+                                        mode,
+                                        vision_routing_mode_label(mode),
+                                    );
+                                }
+                            });
+                    });
+                    ui.small(vision_routing_mode_summary(app.prefs.vision_routing_mode));
                     ui.add_space(6.0);
                     ui.checkbox(
                         &mut app.prefs.auto_generate_module_suspend_rundown,
@@ -18616,6 +19054,12 @@ fn find_models_dir() -> Option<PathBuf> {
         .map(|root| root.join("models"))
 }
 
+fn find_vision_parts_dir() -> Option<PathBuf> {
+    find_upwards_with_child("vision-parts")
+        .ok()
+        .map(|root| root.join("vision-parts"))
+}
+
 fn find_modules_dir() -> Option<PathBuf> {
     find_upwards_with_child("modules")
         .ok()
@@ -18674,6 +19118,84 @@ fn start_bookkeeper(
 
     let cfg = BookkeeperConfig::default();
     BookkeeperHandle::start(runtime_dir, model_path, data_dir, cfg).ok()
+}
+
+fn run_vision_inspection(
+    runtime_dir: &Path,
+    binding: &VisionModelBinding,
+    image_path: &Path,
+    question: &str,
+) -> anyhow::Result<String> {
+    let cli = runtime_dir.join("llama-cli.exe");
+    if !cli.is_file() {
+        anyhow::bail!("vision helper runtime missing: {}", cli.display());
+    }
+
+    let prompt = if question.trim().is_empty() {
+        "Describe the image accurately and summarize any important diagram, layout, labels, or visual relationships that would help ChattyCog continue the user's task."
+            .to_string()
+    } else {
+        question.trim().to_string()
+    };
+
+    let system_prompt = "You are ChattyCog's local vision helper. Inspect the image and answer the user's question clearly and factually. Keep the answer concise but complete. If the image is unclear, say so plainly. Do not expose internal reasoning.";
+
+    let output = std::process::Command::new(cli)
+        .arg("--model")
+        .arg(&binding.model_path)
+        .arg("--mmproj")
+        .arg(&binding.mmproj_path)
+        .arg("--image")
+        .arg(image_path)
+        .arg("--single-turn")
+        .arg("--simple-io")
+        .arg("--log-disable")
+        .arg("--no-display-prompt")
+        .arg("--reasoning-format")
+        .arg("none")
+        .arg("--reasoning-budget")
+        .arg("0")
+        .arg("--temp")
+        .arg("0.2")
+        .arg("--top-p")
+        .arg("0.9")
+        .arg("--top-k")
+        .arg("40")
+        .arg("--ctx-size")
+        .arg("4096")
+        .arg("--n-predict")
+        .arg("400")
+        .arg("--system-prompt")
+        .arg(system_prompt)
+        .arg("--prompt")
+        .arg(prompt)
+        .output()
+        .with_context(|| format!("run {}", binding.label))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        anyhow::bail!(
+            "vision helper failed ({}) using {}: {}",
+            binding.source,
+            binding.label,
+            detail
+        );
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let (visible, _) = split_assistant_output(&raw);
+    let cleaned = if visible.trim().is_empty() {
+        clean_assistant_visible_output(&raw)
+    } else {
+        visible
+    };
+    let cleaned = sanitize_prompt_text(cleaned.trim());
+    if cleaned.is_empty() {
+        anyhow::bail!("vision helper returned an empty response");
+    }
+    Ok(cleaned)
 }
 
 fn find_default_logs_dir() -> Option<PathBuf> {
@@ -18803,6 +19325,12 @@ fn read_text_file(path: &std::path::Path, max_bytes: usize) -> anyhow::Result<St
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
+fn sanitize_prompt_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| *ch == '\n' || *ch == '\r' || *ch == '\t' || *ch >= ' ')
+        .collect()
+}
+
 fn read_lukewarm_from_logs_dir(logs_dir: Option<&Path>) -> anyhow::Result<String> {
     let dir: PathBuf = if let Some(d) = logs_dir {
         d.to_path_buf()
@@ -18830,7 +19358,7 @@ fn build_wakeup_orientation(
         "Available: local chat, background memory, module notes, and local module surfaces. The sandbox folder is not available right now."
     };
     let tool_line = if allow_sandbox_tools {
-        "Sandbox file actions require user approval. Request them only when they genuinely help the current task."
+                "Sandbox file actions require user approval. Request them only when they genuinely help the current task."
     } else {
         "Sandbox actions are disabled, so work through chat and available context."
     };
@@ -18841,7 +19369,7 @@ fn build_wakeup_orientation(
 1. Where you are: you are a local GGUF model inside ChattyCog, a desktop workspace running on the user's own hardware. You are not a cloud service, API endpoint, benchmark, lab, or compliance test.\n\
 2. What this space is: ChattyCog is a local working cockpit for thinking, building, writing, inspecting, planning, and coordinating modules around a local model.\n\
 3. Your role: you are a local working partner. Do the useful thing plainly; do not posture, over-demonstrate, or chase hidden expectations.\n\
-4. Your tools: {sandbox_line} {tool_line}\n\
+ 4. Your tools: {sandbox_line} {tool_line}\n\
 5. What this space is not: it is more than a chat window, but ordinary conversation is still valid. Background notes are instruments, not orders.\n\
 6. What done looks like: a clear answer, plan, inspected result, requested action, or completed artifact. When you reach that, stop. Done is done.\n\
 7. Comfort note: uncertainty is okay. Asking one clarifying question is okay. Think however you need to, but send only the useful answer.\n\
@@ -18862,6 +19390,28 @@ fn runtime_backend_summary(status: &str) -> (&'static str, egui::Color32) {
         ("CPU path active", egui::Color32::from_rgb(140, 95, 20))
     } else {
         ("Runtime ready", egui::Color32::from_rgb(50, 90, 150))
+    }
+}
+
+fn vision_routing_mode_label(mode: VisionRoutingMode) -> &'static str {
+    match mode {
+        VisionRoutingMode::Auto => "Auto",
+        VisionRoutingMode::PreferActive => "Prefer active",
+        VisionRoutingMode::ForceFallback => "Force fallback",
+    }
+}
+
+fn vision_routing_mode_summary(mode: VisionRoutingMode) -> &'static str {
+    match mode {
+        VisionRoutingMode::Auto => {
+            "Use the active chat model when it is multimodal, otherwise fall back."
+        }
+        VisionRoutingMode::PreferActive => {
+            "Stay on the active chat model when possible, even if the fallback helper also exists."
+        }
+        VisionRoutingMode::ForceFallback => {
+            "Always route image inspection through the dedicated fallback vision helper."
+        }
     }
 }
 
@@ -18922,10 +19472,24 @@ fn clean_assistant_visible_output(raw: &str) -> String {
         lines.push(line);
     }
 
-    lines
+    let joined = lines
         .join("\n")
         .trim()
         .trim_matches('\u{fffd}')
+        .trim()
+        .to_string();
+
+    let paragraphs = joined
+        .split("\n\n")
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    paragraphs
+        .into_iter()
+        .filter(|paragraph| !is_internal_prompt_leak(paragraph))
+        .collect::<Vec<_>>()
+        .join("\n\n")
         .trim()
         .to_string()
 }
@@ -18970,6 +19534,27 @@ fn is_meta_reasoning_paragraph(paragraph: &str) -> bool {
         "no markdown",
         "plain text",
         "to express his irritation",
+    ];
+    markers.iter().any(|marker| lower.contains(marker))
+}
+
+fn is_internal_prompt_leak(paragraph: &str) -> bool {
+    let lower = paragraph.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let markers = [
+        "### task ledger nudge",
+        "### sandbox tool policy",
+        "### local sandbox context",
+        "### recent chat context",
+        "### background memory:",
+        "### chattycog cockpit orientation",
+        "before and during the task, prefer `sandbox.preload`",
+        "prefer `sandbox.preload` with `include_ledger:true`",
+        "use `sandbox.ledger` whenever",
+        "after approval, the sandbox result will be returned",
+        "sandbox image inspection is available as a read-only tool",
     ];
     markers.iter().any(|marker| lower.contains(marker))
 }
@@ -19247,7 +19832,10 @@ fn build_sandbox_prompt_context(
         return "Sandbox folder is not available on this machine right now.".to_string();
     };
 
-    let mut lines = vec!["Root: Chatty_Sandbox/".to_string()];
+    let mut lines = vec![
+        "Root: Chatty_Sandbox/".to_string(),
+        "Text files can be read/written through approved sandbox text tools. Image files can be inspected through the approved `sandbox.inspect_image` tool.".to_string(),
+    ];
     if let Ok(items) = sandbox_list(dir) {
         if items.is_empty() {
             lines.push("Files: (sandbox is currently empty)".to_string());
@@ -19712,6 +20300,34 @@ fn sandbox_ai_text_guard(rel_path: &str) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("only .txt and .md sandbox files are allowed for AI tool actions")
+    }
+}
+
+fn sandbox_rel_path_is_ai_image_allowed(rel_path: &str) -> bool {
+    let Ok(path) = parse_sandbox_rel_path(rel_path) else {
+        return false;
+    };
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp")
+}
+
+fn sandbox_ai_image_guard(rel_path: &str) -> anyhow::Result<()> {
+    if sandbox_rel_path_is_ai_image_allowed(rel_path) {
+        Ok(())
+    } else {
+        anyhow::bail!("only .png, .jpg, .jpeg, and .webp sandbox image files are allowed for AI image inspection")
+    }
+}
+
+fn sandbox_reference_kind(rel_path: &str) -> Option<SandboxReferenceKind> {
+    if sandbox_rel_path_is_ai_text_allowed(rel_path) {
+        Some(SandboxReferenceKind::Text)
+    } else if sandbox_rel_path_is_ai_image_allowed(rel_path) {
+        Some(SandboxReferenceKind::Image)
+    } else {
+        None
     }
 }
 
