@@ -55,14 +55,6 @@ pub struct PromptCapsule {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-pub enum VisionRoutingMode {
-    #[default]
-    Auto,
-    PreferActive,
-    ForceFallback,
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppPreferences {
     #[serde(default)]
@@ -91,8 +83,6 @@ pub struct AppPreferences {
     pub network_device_groups: HashMap<String, String>,
     #[serde(default)]
     pub allow_sandbox_tool_requests: bool,
-    #[serde(default)]
-    pub vision_routing_mode: VisionRoutingMode,
     #[serde(default = "default_true")]
     pub auto_generate_module_suspend_rundown: bool,
     #[serde(default)]
@@ -130,7 +120,6 @@ impl Default for AppPreferences {
             network_device_aliases: HashMap::new(),
             network_device_groups: HashMap::new(),
             allow_sandbox_tool_requests: true,
-            vision_routing_mode: VisionRoutingMode::Auto,
             auto_generate_module_suspend_rundown: true,
             orchestrator_capsules: Vec::new(),
             modules: HashMap::new(),

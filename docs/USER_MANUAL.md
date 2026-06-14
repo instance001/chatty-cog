@@ -50,10 +50,7 @@ Inside `chattycog_gui/`:
 - `module_templates/`
   - Copy-safe starter modules you can duplicate into `modules/`.
 - `Chatty_Sandbox/`
-  - A safe scratch folder you can drop files into and open from the app.
-  - AI-requested sandbox file creation/editing is scoped to `.txt`, `.md`, and `.markdown` only.
-  - Approved read-only image inspection is also available for `.png`, `.jpg`, `.jpeg`, and `.webp`.
-  - Executables and code files cannot be created through the sandbox.
+  - A safe scratch folder you can drop files into and open from the app. Sandbox file creation is scoped to .txt and .md only. Executables and code files cannot be created through the sandbox.
 
 ## Build and run
 
@@ -104,9 +101,8 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 
 6) Sandbox tool requests (optional)
 - The orchestrator cannot directly read/write your files.
-- If it needs to work within `Chatty_Sandbox/`, it can request sandbox actions like `write`, `append`, `read`, `list`, `preload`, `ledger`, or `inspect_image`.
-- Text file creation/editing is limited to `.txt`, `.md`, and `.markdown`.
-- Image inspection is read-only and limited to `.png`, `.jpg`, `.jpeg`, and `.webp`.
+- If it needs to read/write within `Chatty_Sandbox/`, it can request sandbox actions like `write`, `append`, `read`, `list`, `preload`, or `ledger`.
+- Chatty-cog sandbox is limited to .txt and .md files.
 - The Chat UI will show a "Pending sandbox actions" panel with `Seed ledger from current prompt`, `Defer actions`, `Preload + Continue`, `Approve`, `Approve + Continue`, and `Reject`.
 - Only approved actions execute, and they are restricted to `Chatty_Sandbox/`.
 - This feature can be enabled/disabled in the Preferences tab.
@@ -121,23 +117,13 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 
 Tips for using this in plain language:
 - You can ask in normal English, e.g. "Create a file `notes/todo.md` in the sandbox and write my task list in it."
-- You can also ask for image understanding, e.g. "Inspect `images/diagram.png` in the sandbox and tell me what this flowchart means."
 - If the model doesn't trigger a sandbox request, add: "Use the sandbox tool to do it."
-- If you already know exactly which sandbox file or image ChattyCog should use, use the chat composer's `Sandbox reference` dropdown:
-  - choose the exact sandbox text file or image
-  - ask your normal question
-  - ChattyCog will treat that item as direct approved context for the turn instead of making the model guess the path
-- For image questions, include the actual question you want answered:
-  - "Inspect `whiteboard/plan.jpg` and summarize the steps."
-  - "Look at `screenshots/error.png` and tell me what the error says."
 - For the most reliable file workflow, use the `Sandbox task` checkbox in the chat composer:
   - turn it on
   - choose `Create file` or `Edit file`
   - enter the target path, such as `notes/todo.md`
   - type the actual content request in plain language
 - In sandbox task mode, ChattyCog explicitly tells the model this turn is a sandbox file job so it wastes fewer tokens trying to infer whether you meant normal conversation or file work.
-- Image inspection does not use `Sandbox task` mode because it is read-only; it comes through as an approved `sandbox.inspect_image` request instead.
-- `Sandbox task` is now for file creation/editing only.
 - For durable working notes, say things like:
   - "Append this plan to the sandbox scratchpad."
   - "Read the scratchpad and continue from it."
@@ -171,20 +157,7 @@ Tips for using this in plain language:
   - actions are restricted to `Chatty_Sandbox/`
   - path traversal (like `..`) is blocked
   - AI-requested sandbox file actions are limited to `.txt`, `.md`, and `.markdown`
-  - AI-requested sandbox image inspection is limited to `.png`, `.jpg`, `.jpeg`, and `.webp`
   - approved sandbox actions now reopen the touched file and focus the Sandbox tab automatically
-- Vision model behavior:
-  - `Preferences -> Access / Tools -> Vision routing` controls how image inspection is routed
-  - `Auto` uses the active chat GGUF if it is multimodal, otherwise falls back
-  - `Prefer active` keeps image inspection on the active chat model when possible
-  - `Force fallback` routes image inspection through the dedicated local vision helper even if the active chat model is also multimodal
-  - fallback vision helpers require a supported model + matching `mmproj` pair in `models/`
-  - image inspection results are injected back into the chat flow as a sandbox tool result, so the main orchestrator can keep reasoning in one place
-  - image quality still depends heavily on the model itself; weaker vision models may produce poor interpretations even when the plumbing is working correctly
-
-7) Internal prompt cleanup
-- ChattyCog strips internal prompt scaffolding such as sandbox-policy headers and task-ledger nudges out of visible assistant replies.
-- If you still see internal helper text in a visible answer, that is a cleanup bug rather than intended behavior.
 
 ### Modules (departments)
 

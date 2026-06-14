@@ -17,14 +17,11 @@
   - Hot memory panel (user-visible recent/pinned items)
   - Logs UI (semantic search + keyword search + log folder explorer)
   - Sandbox explorer/editor (`Chatty_Sandbox/`)
-  - Orchestrator sandbox tool requests (user-approved write/append/read/list/preload/ledger/image inspection within `Chatty_Sandbox/`)
+  - Orchestrator sandbox tool requests (user-approved write/append/read/list/preload/ledger within `Chatty_Sandbox/`)
   - Explicit composer-level sandbox task mode (`Create file` / `Edit file` + target path) that wraps the current user turn in deterministic sandbox instructions before generation
-  - Separate chat-composer sandbox reference selector that can inject a specific approved sandbox text file or image directly into the next turn context
   - Persistent sandbox scratchpad (`Chatty_Sandbox/scratchpad/current.md`) injected back into the prompt as durable working notes
   - Structured task ledger (`Chatty_Sandbox/scratchpad/task_ledger.md`) injected back into the prompt for current task / next step / open questions / files touched
   - Multi-step prompt detection that nudges the orchestrator toward sandbox preload + ledger use when a task looks long or structured
-  - Multimodal sandbox image inspection path with user-selectable routing: `Auto`, `Prefer active`, or `Force fallback`
-  - Visible-output cleanup that strips leaked internal prompt headers such as task-ledger nudges and sandbox-policy blocks before assistant replies are rendered
   - Dynamic module discovery + tabs (`chattycog_gui/modules/*/manifest.json`)
   - Module workspace surfaces:
     - `ui.json` form -> `state.json`
@@ -44,38 +41,6 @@
     - GPU-allowed chat generation (`generate_chat`)
     - CPU-only generation (`generate_text_cpu_only`)
     - CPU-only embeddings (`embed_text_cpu_only`)
-  - For sandbox image inspection, ChattyCog uses the bundled `llama-cli.exe` multimodal path with:
-    - selected vision GGUF
-    - matching `mmproj` projector
-    - approved sandbox image path
-    - concise no-reasoning inspection prompt
-
-## Multimodal sandbox flow
-
-- The orchestrator can emit a JSON tool request like `sandbox.inspect_image`.
-- The request is approval-gated in the same pending sandbox actions UI used for file operations.
-- Image access is read-only and restricted to approved formats inside `Chatty_Sandbox/`.
-- After approval, ChattyCog:
-  - resolves the image path inside the sandbox jail
-  - chooses a vision binding:
-    - active chat model + matching `mmproj`, if available
-    - otherwise a supported fallback vision pair discovered in `models/`
-  - runs a one-shot multimodal `llama-cli` inspection subprocess
-  - injects the result back into the orchestrator flow as the latest sandbox tool result
-- This keeps "seeing" attached to the main chat experience even when a dedicated fallback vision helper model is doing the actual image read.
-
-## Direct sandbox reference flow
-
-- The chat composer can also bind the next user turn to a selected sandbox item without waiting for the model to emit tool JSON.
-- If the selected item is a text file:
-  - ChattyCog reads the file directly
-  - sanitizes the text for prompt safety
-  - injects it as already-approved reference context for that turn
-- If the selected item is an image:
-  - ChattyCog runs the multimodal inspection path immediately
-  - sanitizes the inspection result
-  - injects the resulting description as already-approved reference context for that turn
-- This reduces token waste and path-guessing when the user already knows which sandbox asset the current question refers to.
 
 ### Memory / Bookkeeper (CPU-only)
 
