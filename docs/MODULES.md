@@ -2,6 +2,13 @@
 
 This document describes how to create drop-in modules for ChattyCog.
 
+Important boundary:
+
+- ChattyCog modules are for the general ChattyCog runtime
+- Chatty-EDU modules are for the education-specific Chatty-EDU runtime
+- those ecosystems are intentionally kept separate and should not be treated as interchangeable hosts
+- that separation is deliberate for safety and policy reasons, especially around kid- and school-oriented use
+
 ## What is a module?
 
 A module is a folder dropped into `chattycog_gui/modules/` that contains a `manifest.json`.
@@ -123,6 +130,33 @@ Why this split exists:
 - CLI/headless tools still need a usable surface inside ChattyCog
 
 So the "middle ground" UI is only meant for modules without their own hosted surface.
+
+## Compound workflow design goal
+
+The bigger design goal is not just "launch a module in a tab." It is to make specialized tools composable inside one working shell.
+
+That means a hosted module should be able to participate in loops like:
+
+- the main ChattyCog AI helps draft a dataset, checklist, or workflow plan
+- a specialist module such as `chatty-quest` turns that into a structured template
+- a media-oriented module such as `chatty-art` generates or reviews companion assets
+- a training or tuning module such as `chatty-lora` feeds back prompt or training advice
+- the user and orchestrator keep iterating without minimizing out to the desktop between each step
+
+In practice, the hosted UI, workspace notes, suspend rundown, and portable bridge are all different lanes in the same flywheel:
+
+- hosted UI keeps the real specialist tool visible
+- workspace or fallback notes hold local working state
+- suspend rundown gives the orchestrator and memory system a human-readable recap
+- bridge files give the standalone tool a clean way to hand status, logs, and approved assets back into the shell
+
+If you are building a module for ChattyCog, aim for that kind of handoff-friendly behavior. The best modules are not just self-contained apps. They are good neighbors in a compounding workflow loop.
+
+Just keep the host boundary clear while you do it:
+
+- build for ChattyCog when the tool belongs in the broader general-purpose ecosystem
+- build for Chatty-EDU when the tool belongs in the school-safe education ecosystem
+- do not assume one module package should freely cross between both hosts without an intentional separate adaptation pass
 
 See also:
 - `docs/MODULE_BUILDER_CHECKLIST.md`

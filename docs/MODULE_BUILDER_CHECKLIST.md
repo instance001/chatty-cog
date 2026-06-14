@@ -33,6 +33,12 @@ Rule of thumb:
 - ChattyCog should host the module
 - ChattyCog should not become the module's real runtime brain
 
+Design target:
+
+- build the module so it can participate in a larger in-app workflow loop, not just open as an isolated tab
+- assume the user may move between the main AI, this module, and sibling tools such as `chatty-art`, `chatty-lora`, or `chatty-quest` without leaving the shell
+- keep the host target explicit: ChattyCog modules are not the same thing as Chatty-EDU modules, even if the tool idea overlaps
+
 ## 4) Add visual hosting
 
 Create or update `visual_load.json`.
@@ -74,6 +80,7 @@ Goal:
 - module optionally reports a short `summary` + `snapshot`
 - if the module already has useful logs, it can declare them for ChattyCog to tail
 - ChattyCog reads that handoff when the module tab is left or closed
+- the next tool or orchestrator pass should be able to pick that handoff up without guesswork
 
 For webviews:
 
@@ -103,6 +110,7 @@ Avoid:
 - treating the bridge as the module's main database
 - coupling the module tightly to ChattyCog internals
 - assuming the bridge exists when the app runs standalone
+- assuming a ChattyCog module should automatically be dropped into Chatty-EDU without a separate intentional adaptation
 
 ## 8) Test both modes
 
@@ -149,4 +157,5 @@ A module is in good shape when:
 - it runs standalone
 - it can be hosted inside a ChattyCog tab
 - it reports a clean suspend handoff through the optional bridge
+- it plays nicely with multi-step loops across ChattyCog and sibling specialist modules
 - it stays simple enough that removing the plug cleanly removes ChattyCog compatibility without breaking the tool itself

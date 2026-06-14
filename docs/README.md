@@ -1,8 +1,10 @@
-# ChattyCog
+# chatty-cog
 
 Offline-first, tabbed desktop GUI for chatting with local **GGUF** models via a bundled **llama.cpp** runtime on Windows.
 
-ChattyCog does not require internet or cloud services to function. It can also optionally connect to other nearby ChattyCog instances over local Wi-Fi or LAN when a user deliberately enables local networking.
+chatty-cog does not require internet or cloud services to function. It can also optionally connect to other nearby chatty-cog instances over local Wi-Fi or LAN when a user deliberately enables local networking.
+
+That peer-to-peer mode is only for chatty-cog-to-chatty-cog connections. It is intentionally incompatible with chatty-edu networking.
 
 This repo currently contains one Rust GUI app: `chattycog_gui/`.
 
@@ -67,11 +69,62 @@ cargo run --manifest-path chattycog_gui/Cargo.toml --bin smoke_llama
   - send and receive short local handoff notes
   - send and receive generic workflow bundles for sharing a whole ChattyCog setup between nearby instances
   - rename/group nearby devices locally so larger peer lists stay manageable
+  - peer networking is intentionally limited to other ChattyCog instances, not Chatty-EDU devices
 - **Modules**:
   - scan `modules/*/manifest.json`, open modules from the **Modules** menu into closable tabs
   - module state surfaces (`ui.json` form -> `state.json`, or `STATE_TEMPLATE.md`/`workspace.md`)
   - auto "suspend rundown" (Bookkeeper-generated) on tab leave, used as cross-module context
   - optional module shared-state transfer stays separate from the generic workflow-bundle lane
+
+## Compounding workflow loops
+
+One of ChattyCog's strongest use cases is not just "open a module in a tab."
+It is using the orchestrator, sandbox, hosted module tabs, and handoff lanes together to build a compounding workflow loop without bouncing back out to the desktop.
+
+In practical terms, that means:
+
+- the main ChattyCog AI can help you plan the next move
+- the sandbox can hold working notes, templates, prompts, and task ledgers
+- a hosted module can keep its own real dashboard or native UI open in a tab
+- the bridge or module rundown can feed back "what happened" into the next step
+- you can iterate across tools while staying inside one window
+
+Example flywheel:
+
+1. Use ChattyCog to help draft a dataset template or content structure for a `chatty-quest` modding pack.
+2. Keep those notes in `Chatty_Sandbox/` so the orchestrator can refine them over multiple turns.
+3. Open a hosted tool module such as `chatty-art` in a tab and generate candidate media without minimizing to desktop.
+4. Have ChattyCog inspect or discuss those outputs through the hosted surface, sandbox notes, and module handoff context.
+5. Move to a `chatty-lora` module lane and ask for training-plan advice, dataset cleanup ideas, or prompt adjustments based on what just worked or failed.
+6. Feed the improved prompts, media decisions, or training notes back into the next `chatty-quest` or `chatty-art` pass.
+
+That creates a flywheel:
+
+- plan
+- generate
+- inspect
+- adjust
+- hand off
+- repeat
+
+Why ChattyCog is useful here:
+
+- the orchestrator can keep the wider goal in view
+- the sandbox gives you a durable local working area
+- hosted module tabs keep the real tool surfaces in front of you
+- suspend rundowns and bridge status give the next step usable context
+- the whole loop can stay inside the app instead of becoming a desktop juggling act
+
+This is especially useful for "compound creation" work where one tool's output becomes another tool's input:
+
+- game modding datasets
+- media generation loops
+- LoRA training preparation
+- prompt refinement across tools
+- iterative asset pipelines
+
+ChattyCog does not magically collapse those tools into one monolith.
+What it does is give them a shared working surface, a shared handoff language, and a shared iteration loop.
 
 ## Troubleshooting
 

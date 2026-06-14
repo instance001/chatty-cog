@@ -7,6 +7,10 @@ Purpose:
 - Provide the human-friendly suspend rundown format you want used for cross-module context.
 - Pair with the optional portable bridge if your module keeps its own standalone UI/state.
 
+Important boundary:
+- This template is for ChattyCog-facing modules.
+- If you want an EDU-safe version for Chatty-EDU, treat that as a separate host target with its own review and adaptation pass.
+
 ## Module identity (required)
 
 - **module_id**: `<same as manifest.json module_id>`

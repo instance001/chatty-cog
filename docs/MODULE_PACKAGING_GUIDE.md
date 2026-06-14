@@ -12,6 +12,7 @@ Goal:
 - keep the module portable
 - keep ChattyCog compatibility optional
 - make install and update steps obvious for other users
+- preserve the handoff surfaces that let the module participate in larger in-app workflow loops
 
 ## Packaging rule of thumb
 
@@ -25,6 +26,8 @@ Then add the ChattyCog plug files as a thin compatibility layer:
 - optional `bridge/` support
 
 If removing those plug files would break the module itself, the module is too tightly coupled.
+
+If keeping those plug files makes the module easier to hand work to the next tool or orchestrator pass, the boundary is doing its job.
 
 ## Folder shape to ship
 
@@ -227,6 +230,7 @@ A strong release should let another person:
 - install it without guessing
 - run it standalone if they want
 - drop it into ChattyCog if they want
+- use it inside a longer loop with the orchestrator or sibling specialist modules
 - remove the ChattyCog plug later without destroying the module itself
 
 That is the boundary we want to protect.

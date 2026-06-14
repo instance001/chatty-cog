@@ -1,16 +1,17 @@
-﻿# ChattyCog User Manual (Zero-Knowledge)
+# chatty-cog User Manual (Zero-Knowledge)
 
 This guide assumes you are starting from scratch and have never used Rust, GGUF models, or llama.cpp before.
 
-## What is ChattyCog?
+## What is chatty-cog?
 
-ChattyCog is a Windows desktop app that lets you chat with local AI models stored as `.gguf` files.
+chatty-cog is a Windows desktop app that lets you chat with local AI models stored as `.gguf` files.
 
 - It runs offline (no call-home / no cloud API required).
 - It uses a local runtime based on llama.cpp.
 - It includes a CPU-only Bookkeeper that stores logs and helps you search them later.
 - It supports modules ("departments") via a simple drop-in folder system.
-- It can optionally connect to other nearby ChattyCog instances over local Wi-Fi or LAN.
+- It can optionally connect to other nearby chatty-cog instances over local Wi-Fi or LAN.
+- That optional peer networking is only for chatty-cog-to-chatty-cog connections, not chatty-edu.
 
 ## Key terms
 
@@ -242,6 +243,43 @@ What this means in plain language:
 - ChattyCog just reads the module's handoff note if the module chooses to provide one
 - if a builder removes that bridge plug, the module still runs, but ChattyCog loses that extra context loop
 
+#### Compound workflow loops
+
+One of the most powerful ChattyCog patterns is using the orchestrator, sandbox, and hosted modules as a loop instead of treating each tab as a disconnected tool.
+
+What that means in practice:
+
+- the Chat tab helps plan the next move
+- the sandbox holds durable notes, prompts, templates, and task state
+- a hosted module keeps the real tool UI visible inside the app
+- the bridge or suspend rundown carries "what happened" back into the next step
+- the next tool starts with better context than the previous one had
+
+Example flywheel:
+
+1. Ask ChattyCog to help draft a dataset template for a `chatty-quest` modding pack.
+2. Save or refine that structure in `Chatty_Sandbox/` so the plan survives more than one reply.
+3. Open a hosted `chatty-art` module and generate candidate media while keeping the overall goal in view.
+4. Return to the Chat tab and ask the orchestrator to review what worked, what failed, and what should change.
+5. Move into a `chatty-lora` lane for training-plan advice, prompt improvements, or dataset-shape cleanup.
+6. Feed those adjustments back into the next `chatty-quest` or `chatty-art` pass.
+
+That creates a practical loop:
+
+- plan
+- generate
+- inspect
+- refine
+- hand off
+- repeat
+
+Why this is useful:
+
+- you do not need to keep minimizing out to separate desktop tools
+- the sandbox can keep intermediate notes and working structure grounded
+- the module bridge gives the next step something better than "start from nothing"
+- ChattyCog becomes the connective tissue between specialized tools, not just another chat window
+
 ### Preferences tab (formerly Models)
 
 The Preferences tab stores and applies defaults across ChattyCog and modules.
@@ -264,6 +302,10 @@ The Preferences tab stores and applies defaults across ChattyCog and modules.
 ### Networking tab
 
 ChattyCog can optionally connect to other nearby ChattyCog instances on the same local Wi-Fi or LAN.
+
+Important boundary:
+- this peer-to-peer mode is only for other ChattyCog instances
+- Chatty-EDU devices are intentionally incompatible peer targets, even on the same network
 
 Use it when you want:
 - one ChattyCog machine to be visible to another nearby one
@@ -474,6 +516,10 @@ If you can see several devices but cannot tell which is which:
 If two nearby machines used to connect before but now show a compatibility note:
 - one of them may still be on an older local build from before the chunked-transfer upgrade
 - rebuild or update the older copy so both sides are on the same networking generation
+
+If the other machine is Chatty-EDU instead:
+- do not treat that as a version mismatch
+- ChattyCog peer networking and Chatty-EDU peer networking are intentionally separate and will not interoperate
 
 ### The app closes immediately
 

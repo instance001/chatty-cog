@@ -16,6 +16,12 @@ This is for:
 
 This is **not** a cloud feature.
 
+Important compatibility boundary:
+
+- ChattyCog peer-to-peer networking only works with other ChattyCog instances
+- it is intentionally incompatible with Chatty-EDU peer networking
+- that is by design, not a bug, and not something a version update is expected to "fix"
+
 ## What it is not
 
 ChattyCog local networking is **not**:
@@ -223,7 +229,8 @@ So the target is "practical local-room transfers a future dev would reasonably e
 - This is **local-only** peer networking.
 - It is **off by default**.
 - It is intended for **nearby trusted local networks**, not public internet use.
-- ChattyCog and Chatty-EDU use different local networking identifiers, so they do **not** accidentally cross-connect.
+- ChattyCog and Chatty-EDU use different local networking identifiers and different peer-network expectations, so they do **not** cross-connect.
+- A Chatty-EDU device is not a compatible ChattyCog peer target, even on the same LAN.
 
 ## Offline promise, clarified
 
@@ -255,6 +262,7 @@ If nearby peers still do not connect cleanly:
 - make sure both machines are running reasonably matching ChattyCog builds
 - older local builds from before the chunked-transfer upgrade will show up as incompatible until they are rebuilt or updated
 - remember that ChattyCog and Chatty-EDU intentionally use different local protocols and will not interconnect
+- if one side is Chatty-EDU, treat that as an unsupported peer pairing rather than a fixable same-family mismatch
 
 ## When to leave it off
 

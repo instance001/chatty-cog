@@ -19,6 +19,36 @@ This is the simplest compatibility rule:
 
 If you remove the bridge logic, the module still runs standalone. It just stops reporting back to ChattyCog.
 
+## Why the bridge matters in practice
+
+The bridge is what turns a hosted module from "a tool in a tab" into "a tool that can participate in a larger loop."
+
+Typical pattern:
+
+- ChattyCog's main AI helps frame the task
+- a specialist module does focused work in its own real UI
+- the module reports status, logs, or waiting assets through the bridge
+- the orchestrator or the next module picks that work up for another pass
+
+That is the intended shape for compound workflows such as:
+
+- drafting a `chatty-quest` dataset template
+- reviewing or generating companion media in `chatty-art`
+- feeding the results into `chatty-lora` for prompt or training guidance
+- looping again with the user still inside the same ChattyCog session
+
+The bridge keeps those handoffs standardized without forcing every module to give up its own runtime or internal state model.
+
+## Host boundary
+
+This bridge contract is for ChattyCog-hosted modules.
+
+- ChattyCog and Chatty-EDU intentionally use different host ecosystems
+- their bridge helpers, policies, and surrounding runtime assumptions are similar in shape but not meant to be mixed casually
+- if you want versions of a tool in both ecosystems, treat that as two deliberate host targets, not one shared safety boundary
+
+That separation is by design, especially because the EDU side carries stricter classroom and child-safety expectations.
+
 Quick copy-paste helpers:
 
 - `docs/MODULE_BRIDGE_SNIPPETS.md`

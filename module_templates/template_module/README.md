@@ -23,6 +23,13 @@ It is stored in `chattycog_gui/module_templates/` so it does **not** auto-load i
 - module-owned local state via `localStorage`
 - optional `bridge/status.json` handoff to ChattyCog
 
+## Host boundary
+
+This starter is for ChattyCog.
+
+- Do not treat it as a drop-in Chatty-EDU starter.
+- If you need an EDU version, build that as a separate host-targeted module with its own safety review.
+
 ## What to rename first
 
 - `module_id` in `manifest.json`
