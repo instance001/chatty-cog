@@ -1,0 +1,8 @@
+bridge/status.json
+bridge/shared_state.json
+bridge/incoming_shared_state.json
+bridge/shared_room_state.json
+bridge/shared_room_events.json
+bridge/outgoing_room_events.json
+bridge/incoming_assets/
+state.json

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -231,12 +232,13 @@ impl ModuleHostState {
             self.support_children.push(child);
         }
 
-        if let Some(wait_ms) = spec.serve_wait_ms {
-            if wait_ms > 0 {
+        if spec.serve.is_some() {
+            let wait_ms = spec.serve_wait_ms.unwrap_or(20_000);
+            if let Some(url) = spec.url.as_deref() {
+                wait_for_url_ready(url, Duration::from_millis(wait_ms));
+            } else if wait_ms > 0 {
                 std::thread::sleep(Duration::from_millis(wait_ms));
             }
-        } else if spec.serve.is_some() {
-            std::thread::sleep(Duration::from_millis(1200));
         }
 
         let target_url =
@@ -434,6 +436,34 @@ const WEBVIEW_HOST_CONFIG: WebviewHostConfig<'static> = WebviewHostConfig {
     other_binary_name: "chattycog_webview_host",
     cargo_bin_name: "chattycog_webview_host",
 };
+
+fn wait_for_url_ready(url: &str, timeout: Duration) {
+    let Ok(parsed) = url::Url::parse(url) else {
+        std::thread::sleep(timeout.min(Duration::from_millis(1200)));
+        return;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        std::thread::sleep(timeout.min(Duration::from_millis(1200)));
+        return;
+    }
+
+    let Some(host) = parsed.host_str() else {
+        std::thread::sleep(timeout.min(Duration::from_millis(1200)));
+        return;
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        std::thread::sleep(timeout.min(Duration::from_millis(1200)));
+        return;
+    };
+
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if TcpStream::connect((host, port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn find_process_window(pid: u32, title_hint: Option<&str>) -> Option<isize> {

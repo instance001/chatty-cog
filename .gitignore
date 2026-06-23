@@ -1,1 +1,20 @@
-/target
+/target/
+**/target/
+
+# Local model blobs stay out of git; keep the folder shape only.
+/models/*
+!/models/.gitkeep
+
+# Module-local runtime state generated while hosted in ChattyCog.
+/modules/*/state.json
+/modules/*/bridge/status.json
+/modules/*/bridge/shared_state.json
+/modules/*/bridge/incoming_shared_state.json
+/modules/*/bridge/shared_room_state.json
+/modules/*/bridge/shared_room_events.json
+/modules/*/bridge/outgoing_room_events.json
+/modules/*/bridge/incoming_assets/
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
