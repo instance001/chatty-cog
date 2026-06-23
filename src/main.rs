@@ -32,10 +32,13 @@ use chattycog_gui::module_registry::{
     ModuleManifest, ModuleNetworkAssetLane, ModuleNetworkFeature, ModuleRegistry,
 };
 use chattycog_gui::networking::{BlockedPeer, NetworkController, ReceivedArtifact, TrustedPeer};
-use chattycog_gui::preferences::{self, AppPreferences, GenParams, ModulePreferences, PromptCapsule};
+use chattycog_gui::preferences::{
+    self, AppPreferences, GenParams, ModulePreferences, PromptCapsule,
+};
 use crossbeam_channel::Receiver;
 use ecg_window::EcgWindowState;
 use eframe::egui;
+use image::ImageReader;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -52,6 +55,9 @@ fn main() -> eframe::Result {
         Box::new(|cc| Ok(Box::new(ChattyCogApp::new(cc)))),
     )
 }
+
+const FMI_SPLASH_IMAGE_PATH: &str = "assets/branding/fmi-splash-wordmark.png";
+const FMI_SPLASH_DURATION: Duration = Duration::from_millis(3000);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tab {
@@ -117,6 +123,12 @@ struct Message {
 }
 
 const MAX_LIVE_CHAT_MESSAGES: usize = 48;
+
+struct StartupSplashState {
+    started_at: Instant,
+    dismissed: bool,
+    texture: Option<egui::TextureHandle>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ReceivedWorkflowStateRecord {
@@ -1215,6 +1227,7 @@ struct ModuleRundownJob {
 struct ChattyCogApp {
     tab: Tab,
     prev_tab: Tab,
+    startup_splash: StartupSplashState,
 
     show_left_sidebar: bool,
     gguf_path: Option<PathBuf>,
@@ -1390,6 +1403,11 @@ impl ChattyCogApp {
         let mut app = Self {
             tab: Tab::Chat,
             prev_tab: Tab::Chat,
+            startup_splash: StartupSplashState {
+                started_at: Instant::now(),
+                dismissed: false,
+                texture: None,
+            },
             show_left_sidebar: true,
             gguf_path: None,
             models_dir: find_models_dir(),
@@ -1561,6 +1579,95 @@ impl ChattyCogApp {
         app
     }
 
+    fn show_startup_splash(&mut self, ctx: &egui::Context) -> bool {
+        if self.startup_splash.dismissed {
+            return false;
+        }
+
+        let elapsed = self.startup_splash.started_at.elapsed();
+        if elapsed >= FMI_SPLASH_DURATION
+            || ctx.input(|input| {
+                input.pointer.any_click()
+                    || input.key_pressed(egui::Key::Escape)
+                    || input.key_pressed(egui::Key::Enter)
+                    || input.key_pressed(egui::Key::Space)
+            })
+        {
+            self.startup_splash.dismissed = true;
+            return false;
+        }
+
+        ctx.request_repaint_after(Duration::from_millis(16));
+
+        if self.startup_splash.texture.is_none() {
+            self.startup_splash.texture =
+                load_local_png_texture(ctx, FMI_SPLASH_IMAGE_PATH, "fmi_splash_wordmark");
+        }
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgb(10, 12, 14))
+                    .inner_margin(egui::Margin::same(24.0)),
+            )
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(28.0);
+                    ui.label(
+                        egui::RichText::new("Fractal Media Infrastructure")
+                            .size(30.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(240, 240, 236)),
+                    );
+                    ui.add_space(10.0);
+
+                    egui::Frame::default()
+                        .fill(egui::Color32::from_rgb(18, 20, 22))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(68, 72, 78),
+                        ))
+                        .inner_margin(egui::Margin::same(18.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width().min(780.0));
+                            if let Some(texture) = self.startup_splash.texture.as_ref() {
+                                let size = texture.size_vec2();
+                                let max_width = ui.available_width().min(720.0);
+                                let scale = (max_width / size.x).min(1.0);
+                                ui.add(
+                                    egui::Image::new(texture)
+                                        .fit_to_exact_size(size * scale)
+                                        .sense(egui::Sense::hover()),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("FMI wordmark asset unavailable")
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(220, 220, 220)),
+                                );
+                            }
+                        });
+
+                    ui.add_space(14.0);
+                    ui.small(
+                        "Independent R&D umbrella for open-source AI tooling, cognitive scaffolding experiments, and local-first research systems.",
+                    );
+                    ui.add_space(12.0);
+                    ui.add(
+                        egui::ProgressBar::new(
+                            (elapsed.as_secs_f32() / FMI_SPLASH_DURATION.as_secs_f32())
+                                .clamp(0.0, 1.0),
+                        )
+                        .desired_width(320.0),
+                    );
+                    ui.add_space(8.0);
+                    ui.small("Press Space, Enter, Esc, or click to continue");
+                });
+            });
+
+        true
+    }
+
     fn sync_capsule_selection_from_prefs(&mut self) {
         let active_name = self
             .prefs
@@ -1583,7 +1690,8 @@ impl ChattyCogApp {
             }
         }
 
-        if self.capsule_editor_name.trim().is_empty() && self.capsule_editor_text.trim().is_empty() {
+        if self.capsule_editor_name.trim().is_empty() && self.capsule_editor_text.trim().is_empty()
+        {
             if let Some(first) = self.prefs.orchestrator_capsules.first() {
                 self.capsule_editor_name = first.name.clone();
                 self.capsule_editor_text = first.text.clone();
@@ -7898,7 +8006,9 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         for action in self.pending_sandbox_actions.drain(..) {
             match action {
                 SandboxAction::Write { path, contents } => {
-                    match sandbox_ai_text_guard(&path).and_then(|_| sandbox_write(&dir, &path, &contents)) {
+                    match sandbox_ai_text_guard(&path)
+                        .and_then(|_| sandbox_write(&dir, &path, &contents))
+                    {
                         Ok(p) => {
                             status_lines.push(format!("Wrote {}", p.display()));
                             result_lines.push(format!(
@@ -7914,7 +8024,9 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     }
                 }
                 SandboxAction::Append { path, contents } => {
-                    match sandbox_ai_text_guard(&path).and_then(|_| sandbox_append(&dir, &path, &contents)) {
+                    match sandbox_ai_text_guard(&path)
+                        .and_then(|_| sandbox_append(&dir, &path, &contents))
+                    {
                         Ok(p) => {
                             status_lines.push(format!("Appended {}", p.display()));
                             result_lines.push(format!(
@@ -8203,6 +8315,9 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
 
 impl eframe::App for ChattyCogApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.show_startup_splash(ctx) {
+            return;
+        }
         self.ecg_window.tick(Instant::now());
         ctx.request_repaint_after(self.ecg_window.refresh_interval());
         // Module on-suspend handshake: when leaving a module tab, debrief the bookkeeper.
@@ -13457,6 +13572,50 @@ fn about_tab(ui: &mut egui::Ui) {
     ui.label("Old-school, tabbed desktop UI for chatting with local GGUF models.");
     ui.add_space(8.0);
     ui.label("Status: llama.cpp runtime wired (llama.dll + ggml backends).");
+    ui.add_space(12.0);
+    ui.group(|ui| {
+        ui.heading("Project Identity");
+        ui.small("Compact stewardship surface for the host shell.");
+        ui.add_space(4.0);
+        ui.label("Publisher / steward: Fractal Media Infrastructure");
+        ui.label("GitHub: instance001");
+        ui.label("License: GNU Affero General Public License v3.0");
+        ui.label("ChattyCog is published under FMI, a small independent R&D umbrella for open-source AI tooling, cognitive scaffolding experiments, and local-first research systems.");
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.hyperlink_to(
+                "Repository: instance001/chatty-cog",
+                "https://github.com/instance001/chatty-cog",
+            );
+            ui.separator();
+            ui.hyperlink_to(
+                "Publisher GitHub: instance001",
+                "https://github.com/instance001",
+            );
+        });
+    });
+}
+
+fn load_local_png_texture(
+    ctx: &egui::Context,
+    path: &str,
+    texture_name: &str,
+) -> Option<egui::TextureHandle> {
+    let bytes = std::fs::read(path).ok()?;
+    let image = ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let pixels = image.into_raw();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    Some(ctx.load_texture(
+        texture_name.to_owned(),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    ))
 }
 
 fn module_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp, module_id: &str) {
@@ -17974,88 +18133,88 @@ fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
-                ui.set_max_width(width);
-                ui.horizontal(|ui| {
-                    ui.colored_label(color, label);
-                });
-                ui.add(egui::Label::new(msg.content.clone()).wrap());
-                if matches!(msg.role, Role::Assistant) {
-                    if let Some(thinking) = msg
-                        .thinking
-                        .as_deref()
-                        .filter(|value| !value.trim().is_empty())
-                    {
-                        ui.add_space(4.0);
-                        let toggle_id = ui.make_persistent_id((
-                            "assistant_thinking_toggle",
-                            msg.content.as_str(),
-                            thinking,
-                        ));
-                        let is_open = ui.ctx().data_mut(|data| {
-                            data.get_persisted::<bool>(toggle_id).unwrap_or(false)
-                        });
-                        let label = if is_open {
-                            if msg.content.trim().is_empty() {
-                                "Hide thinking (live)"
-                            } else {
-                                "Hide thinking"
-                            }
-                        } else if msg.content.trim().is_empty() {
-                            "Show thinking (live)"
-                        } else {
-                            "Show thinking"
-                        };
-                        egui::Frame::none()
-                            .fill(ui.visuals().faint_bg_color)
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                ui.visuals().widgets.noninteractive.bg_stroke.color,
-                            ))
-                            .rounding(egui::Rounding::same(6.0))
-                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let chevron = if is_open { "▼" } else { "▶" };
-                                    let response = ui.add(
-                                        egui::Button::new(format!("{chevron} {label}"))
-                                            .frame(false),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.small(
-                                                egui::RichText::new("Reasoning trace")
-                                                    .weak()
-                                                    .monospace(),
-                                            );
-                                        },
-                                    );
-                                    if response.clicked() {
-                                        ui.ctx().data_mut(|data| {
-                                            data.insert_persisted(toggle_id, !is_open);
-                                        });
-                                    }
-                                });
-                            });
-                        if is_open {
+                    ui.set_max_width(width);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(color, label);
+                    });
+                    ui.add(egui::Label::new(msg.content.clone()).wrap());
+                    if matches!(msg.role, Role::Assistant) {
+                        if let Some(thinking) = msg
+                            .thinking
+                            .as_deref()
+                            .filter(|value| !value.trim().is_empty())
+                        {
                             ui.add_space(4.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt(("assistant_thinking", msg.content.as_str()))
-                                .max_height(220.0)
+                            let toggle_id = ui.make_persistent_id((
+                                "assistant_thinking_toggle",
+                                msg.content.as_str(),
+                                thinking,
+                            ));
+                            let is_open = ui.ctx().data_mut(|data| {
+                                data.get_persisted::<bool>(toggle_id).unwrap_or(false)
+                            });
+                            let label = if is_open {
+                                if msg.content.trim().is_empty() {
+                                    "Hide thinking (live)"
+                                } else {
+                                    "Hide thinking"
+                                }
+                            } else if msg.content.trim().is_empty() {
+                                "Show thinking (live)"
+                            } else {
+                                "Show thinking"
+                            };
+                            egui::Frame::none()
+                                .fill(ui.visuals().faint_bg_color)
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    ui.visuals().widgets.noninteractive.bg_stroke.color,
+                                ))
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                 .show(ui, |ui| {
-                                    let mut thinking_text = thinking.to_string();
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut thinking_text)
-                                            .code_editor()
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(8)
-                                            .interactive(false),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        let chevron = if is_open { "▼" } else { "▶" };
+                                        let response = ui.add(
+                                            egui::Button::new(format!("{chevron} {label}"))
+                                                .frame(false),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.small(
+                                                    egui::RichText::new("Reasoning trace")
+                                                        .weak()
+                                                        .monospace(),
+                                                );
+                                            },
+                                        );
+                                        if response.clicked() {
+                                            ui.ctx().data_mut(|data| {
+                                                data.insert_persisted(toggle_id, !is_open);
+                                            });
+                                        }
+                                    });
                                 });
+                            if is_open {
+                                ui.add_space(4.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("assistant_thinking", msg.content.as_str()))
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        let mut thinking_text = thinking.to_string();
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut thinking_text)
+                                                .code_editor()
+                                                .desired_width(f32::INFINITY)
+                                                .desired_rows(8)
+                                                .interactive(false),
+                                        );
+                                    });
+                            }
                         }
                     }
-                }
-            });
+                });
         },
     );
     ui.add_space(6.0);
@@ -18878,8 +19037,7 @@ Chat behavior rules:\n\
 }
 
 fn strip_chatty_output_markers(raw: &str) -> String {
-    raw
-        .replace("<|im_start|>", "")
+    raw.replace("<|im_start|>", "")
         .replace("<|im_end|>", "")
         .replace("<im_start>", "")
         .replace("<im_end>", "")
@@ -18993,8 +19151,7 @@ fn dedupe_paragraphs(paragraphs: Vec<String>) -> Vec<String> {
 
 fn trim_exact_repeated_suffix(text: &mut String) -> bool {
     let candidate_lengths = [
-        1536usize, 1280, 1024, 896, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64,
-        48, 32,
+        1536usize, 1280, 1024, 896, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64, 48, 32,
     ];
     let mut changed = false;
     loop {

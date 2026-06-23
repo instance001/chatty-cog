@@ -157,9 +157,9 @@ pub fn load_prefs(path: &Path) -> Result<AppPreferences> {
     if prefs.bookkeeper.max_tokens <= 0 {
         prefs.bookkeeper.max_tokens = 256;
     }
-    prefs.orchestrator_capsules.retain(|capsule| {
-        !capsule.name.trim().is_empty() && !capsule.text.trim().is_empty()
-    });
+    prefs
+        .orchestrator_capsules
+        .retain(|capsule| !capsule.name.trim().is_empty() && !capsule.text.trim().is_empty());
     Ok(prefs)
 }
 

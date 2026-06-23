@@ -8,6 +8,7 @@ anyhow = "1"
 base64 = "0.22"
 crossbeam-channel = "0.5"
 eframe = { version = "0.30", default-features = true, features = ["wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 libloading = "0.8"
 module_host_support = { path = "module_host_support" }
 rfd = "0.15"

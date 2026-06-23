@@ -771,6 +771,7 @@ dependencies = [
  "bindgen",
  "crossbeam-channel",
  "eframe",
+ "image",
  "libloading",
  "module_host_support",
  "rfd",

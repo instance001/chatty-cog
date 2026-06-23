@@ -171,10 +171,10 @@ mod windows_backend {
     use windows_sys::Win32::System::Performance::{
         PDH_CSTATUS_INVALID_DATA, PDH_CSTATUS_ITEM_NOT_VALIDATED, PDH_CSTATUS_NEW_DATA,
         PDH_CSTATUS_NO_INSTANCE, PDH_CSTATUS_NO_MACHINE, PDH_CSTATUS_NO_OBJECT,
-        PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W,
-        PDH_FMT_DOUBLE, PDH_INVALID_DATA, PDH_MORE_DATA, PDH_NO_DATA, PdhAddEnglishCounterW,
-        PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-        PdhGetFormattedCounterValue, PdhOpenQueryW,
+        PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
+        PDH_INVALID_DATA, PDH_MORE_DATA, PDH_NO_DATA, PdhAddEnglishCounterW, PdhCloseQuery,
+        PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhGetFormattedCounterValue,
+        PdhOpenQueryW,
     };
 
     const STATUS_SUCCESS: u32 = 0;
