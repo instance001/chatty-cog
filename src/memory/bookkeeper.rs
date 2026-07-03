@@ -396,6 +396,83 @@ fn sanitize_rundown_output(module_id: &str, raw: &str) -> String {
     format!("{bullet}\n{para}")
 }
 
+fn sanitize_lukewarm_output(raw: &str) -> String {
+    fn clamp_chars(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            return s.to_string();
+        }
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push_str("...");
+        out
+    }
+
+    let mut s = raw.trim().to_string();
+    if s.is_empty() {
+        return String::new();
+    }
+
+    s = s
+        .replace("<bullet>", "")
+        .replace("<paragraph>", "")
+        .replace("```", "");
+
+    let lines: Vec<String> = s
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let mut bullet: Option<String> = None;
+    let mut para_parts = Vec::new();
+    for line in &lines {
+        let normalized = line
+            .trim_start_matches(['-', '*', '•', ' '])
+            .trim()
+            .to_string();
+        if looks_like_lukewarm_scaffolding(&normalized) {
+            continue;
+        }
+        if bullet.is_none() && !normalized.is_empty() {
+            bullet = Some(format!("- {normalized}"));
+        } else if !normalized.is_empty() {
+            para_parts.push(normalized);
+        }
+    }
+
+    let bullet = bullet.unwrap_or_else(|| "- Recent activity updated.".to_string());
+    let para = if para_parts.is_empty() {
+        "Current context is available in the recent activity summary.".to_string()
+    } else {
+        para_parts.join(" ")
+    };
+
+    let bullet = clamp_chars(bullet.trim(), 180);
+    let para = clamp_chars(para.trim(), 320);
+    format!("{bullet}\n{para}")
+}
+
+fn looks_like_lukewarm_scaffolding(line: &str) -> bool {
+    let normalized = line.trim().to_ascii_lowercase();
+    [
+        "okay, let's",
+        "ok, let's",
+        "first, i need",
+        "i need to parse",
+        "looking at the activity",
+        "the key points",
+        "the bullet should",
+        "the paragraph needs",
+        "the user wants",
+    ]
+    .iter()
+    .any(|pattern| normalized.starts_with(pattern))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DepartmentStatusItem {
     module_id: String,
@@ -575,6 +652,8 @@ impl LukeWarm {
         self.token_est += (line.len().max(1) + 3) / 4;
         self.buf.push(line);
 
+        // Keep the most recent summary around as a compact continuity anchor once
+        // raw events start aging out of the active rolling buffer.
         while self.token_est > self.cfg.lukewarm_token_window && !self.buf.is_empty() {
             let removed = self.buf.remove(0);
             self.token_est = self
@@ -609,6 +688,13 @@ impl LukeWarm {
         }
 
         let mut prompt = String::new();
+        if !self.summary.trim().is_empty() {
+            prompt.push_str("Existing rolling summary:\n");
+            prompt.push_str(self.summary.trim());
+            prompt.push_str(
+                "\n\nUpdate that summary using the recent activity below. Preserve still-relevant context, drop stale detail, and keep the result compact.\n\n",
+            );
+        }
         prompt.push_str("Summarize the recent activity below into ONE bullet point and ONE short paragraph (max ~80 words). ");
         prompt
             .push_str("Focus on what happened, key decisions, and what is currently in progress. ");
@@ -631,7 +717,7 @@ impl LukeWarm {
             cancel,
             |t| out.push_str(t),
         );
-        let out = out.trim().to_string();
+        let out = sanitize_lukewarm_output(out.trim());
         if !out.is_empty() {
             self.summary = out;
             self.last_summary_at = Some(now);

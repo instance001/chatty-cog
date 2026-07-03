@@ -92,6 +92,33 @@ and injects them into the orchestrator system prompt.
 
 If the user has activated a capsule from Preferences, that capsule is also layered into the orchestrator system prompt as an explicit style/persona overlay.
 
+## Known fragile surfaces
+
+These are the UI paths most likely to regress during layout or state refactors.
+
+### Chat layout contract
+
+- The Chat tab assumes a three-column layout: `Hot Memory`, transcript, and `Luke Warm`.
+- Long transcript content must wrap inside the center column instead of renegotiating the overall workspace width.
+- Read-only assistant "thinking" content is especially sensitive because non-wrapping editors can silently force horizontal creep if they are embedded in the transcript.
+
+### Composer focus contract
+
+- The chat composer should survive ordinary layout churn while the user is typing.
+- Dynamic helper rows above the composer, such as sandbox hints or approval blocks, can change the vertical layout from one frame to the next.
+- If those rows appear or disappear while the composer is active, focus recovery logic needs to keep the text input usable without requiring a reclick.
+
+### Luke Warm refresh contract
+
+- `lukewarm_summary` is displayed in both the Chat tab and Logs sidebar, but it is refreshed by a time-based poll loop in the main app update path.
+- That poll loop depends on scheduled repaints as well as the background receiver state.
+- If repaint scheduling is removed or weakened, Luke Warm can appear to "freeze" even though the underlying summary source is still changing.
+
+### Regression guardrail
+
+- Use [CHAT_UI_SMOKE_CHECKLIST.md](C:/Users/User/Desktop/github_portal/chatty-cog/docs/CHAT_UI_SMOKE_CHECKLIST.md) after changes to chat layout, composer behavior, Luke Warm rendering, or sandbox approval surfaces.
+- Treat width drift, focus loss after a short pause, and idle Luke Warm polling stalls as first-class regressions, not cosmetic issues.
+
 ## Packaging direction
 
 The current layout keeps `models/`, `runtime/`, `memory/`, `modules/`, and `Chatty_Sandbox/` inside `chattycog_gui/` so a future packaged app can ship a single directory tree:

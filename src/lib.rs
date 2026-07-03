@@ -1,3 +1,4 @@
+pub mod app_paths;
 pub mod llama_dyn;
 pub mod llama_sys;
 pub mod memory;

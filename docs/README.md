@@ -143,6 +143,7 @@ What it does is give them a shared working surface, a shared handoff language, a
 - User manual: `docs/USER_MANUAL.md`
 - Networking guide: `docs/NETWORKING.md`
 - Architecture notes: `docs/ARCHITECTURE.md`
+- Chat UI smoke checklist: `docs/CHAT_UI_SMOKE_CHECKLIST.md`
 - Modules / plug-in system: `docs/MODULES.md`
 - Demo modules onboarding: `docs/DEMO_MODULES.md`
 - Changelog: `CHANGELOG.md`
