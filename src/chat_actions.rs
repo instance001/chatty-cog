@@ -20,8 +20,7 @@ pub(super) fn reject_pending_sandbox_actions(app: &mut ChattyCogApp) {
 pub(super) fn handle_chat_send(ctx: &egui::Context, app: &mut ChattyCogApp) {
     if app.is_generating {
         app.runtime_status =
-            "Runtime: please wait for the current reply to finish, or press Interrupt."
-                .to_string();
+            "Runtime: please wait for the current reply to finish, or press Interrupt.".to_string();
         ctx.request_repaint();
         return;
     }
@@ -121,11 +120,8 @@ fn prepare_outgoing_chat_turn(
             ctx.request_repaint();
             return None;
         }
-        generation_prompt = build_explicit_sandbox_task_prompt(
-            &content,
-            &sandbox_path,
-            app.sandbox_task_intent,
-        );
+        generation_prompt =
+            build_explicit_sandbox_task_prompt(&content, &sandbox_path, app.sandbox_task_intent);
     }
 
     Some(OutgoingChatTurn {

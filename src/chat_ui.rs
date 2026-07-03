@@ -609,10 +609,7 @@ fn render_pending_sandbox_action(ui: &mut egui::Ui, action: &SandboxAction) {
                 ));
             }
             if !next_step.trim().is_empty() {
-                parts.push(format!(
-                    "next: {}",
-                    truncate_for_ui(next_step.trim(), 80)
-                ));
+                parts.push(format!("next: {}", truncate_for_ui(next_step.trim(), 80)));
             }
             if !open_questions.is_empty() {
                 parts.push(format!("questions: {}", open_questions.len()));
@@ -743,8 +740,7 @@ fn render_chat_transcript(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_heigh
                         message_bubble(ui, msg);
                     }
                     if app.is_generating && !app.assistant_draft.is_empty() {
-                        let (visible, thinking) =
-                            split_assistant_output(&app.assistant_draft);
+                        let (visible, thinking) = split_assistant_output(&app.assistant_draft);
                         message_bubble(
                             ui,
                             &Message {
@@ -892,5 +888,3 @@ pub(super) fn runtime_backend_summary(status: &str) -> (&'static str, egui::Colo
         ("Runtime ready", egui::Color32::from_rgb(50, 90, 150))
     }
 }
-
-

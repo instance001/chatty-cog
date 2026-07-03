@@ -130,8 +130,7 @@ fn render_models_bookkeeper_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.top_p, 0.0..=1.0).text("top_p"));
         ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.top_k, 0..=200).text("top_k"));
         ui.add(
-            egui::Slider::new(&mut app.prefs.bookkeeper.max_tokens, 1..=4096)
-                .text("max_tokens"),
+            egui::Slider::new(&mut app.prefs.bookkeeper.max_tokens, 1..=4096).text("max_tokens"),
         );
     });
 }
@@ -209,8 +208,7 @@ fn render_models_module_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 ui.add(egui::Slider::new(&mut entry.params.top_p, 0.0..=1.0).text("top_p"));
                 ui.add(egui::Slider::new(&mut entry.params.top_k, 0..=200).text("top_k"));
                 ui.add(
-                    egui::Slider::new(&mut entry.params.max_tokens, 1..=4096)
-                        .text("max_tokens"),
+                    egui::Slider::new(&mut entry.params.max_tokens, 1..=4096).text("max_tokens"),
                 );
                 ui.checkbox(
                     &mut entry.allow_receive_lukewarm_context,

@@ -12,8 +12,8 @@ mod chat_actions;
 mod chat_ui;
 mod ecg_window;
 mod logs_ui;
-mod module_ui;
 mod models_ui;
+mod module_ui;
 mod networking_ui;
 mod sandbox_editor;
 mod sandbox_ops;
@@ -74,6 +74,7 @@ fn main() -> eframe::Result {
 
 const FMI_SPLASH_IMAGE_PATH: &str = "assets/branding/fmi-splash-wordmark.png";
 const FMI_SPLASH_DURATION: Duration = Duration::from_millis(3000);
+const FMI_SPLASH_CLICK_DISMISS_DELAY: Duration = Duration::from_millis(450);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tab {
@@ -1417,13 +1418,19 @@ impl ChattyCogApp {
             (!prefs.network_device_id.trim().is_empty()).then(|| prefs.network_device_id.clone()),
         );
 
+        let startup_splash_texture = load_local_png_texture(
+            &cc.egui_ctx,
+            &resolve_local_asset_path(FMI_SPLASH_IMAGE_PATH),
+            "fmi_splash_wordmark",
+        );
+
         let mut app = Self {
             tab: Tab::Chat,
             prev_tab: Tab::Chat,
             startup_splash: StartupSplashState {
                 started_at: Instant::now(),
                 dismissed: false,
-                texture: None,
+                texture: startup_splash_texture,
             },
             show_left_sidebar: true,
             gguf_path: None,
@@ -1604,9 +1611,10 @@ impl ChattyCogApp {
         }
 
         let elapsed = self.startup_splash.started_at.elapsed();
+        let allow_click_dismiss = elapsed >= FMI_SPLASH_CLICK_DISMISS_DELAY;
         if elapsed >= FMI_SPLASH_DURATION
             || ctx.input(|input| {
-                input.pointer.any_click()
+                (allow_click_dismiss && input.pointer.any_click())
                     || input.key_pressed(egui::Key::Escape)
                     || input.key_pressed(egui::Key::Enter)
                     || input.key_pressed(egui::Key::Space)
@@ -1617,11 +1625,6 @@ impl ChattyCogApp {
         }
 
         ctx.request_repaint_after(Duration::from_millis(16));
-
-        if self.startup_splash.texture.is_none() {
-            self.startup_splash.texture =
-                load_local_png_texture(ctx, FMI_SPLASH_IMAGE_PATH, "fmi_splash_wordmark");
-        }
 
         egui::CentralPanel::default()
             .frame(
@@ -8139,7 +8142,8 @@ impl eframe::App for ChattyCogApp {
                         self.lukewarm_rx = Some(rx);
                     } else {
                         self.lukewarm_summary =
-                            read_lukewarm_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
+                            read_lukewarm_from_logs_dir(self.logs_dir.as_deref())
+                                .unwrap_or_default();
                         self.lukewarm_poll_due = Some(Instant::now() + Duration::from_secs(2));
                     }
                 }
@@ -8789,10 +8793,9 @@ fn networking_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     networking_ui::networking_tab(ui, app);
 }
 
-
 fn load_local_png_texture(
     ctx: &egui::Context,
-    path: &str,
+    path: &Path,
     texture_name: &str,
 ) -> Option<egui::TextureHandle> {
     let bytes = std::fs::read(path).ok()?;
@@ -8810,6 +8813,28 @@ fn load_local_png_texture(
         color_image,
         egui::TextureOptions::LINEAR,
     ))
+}
+
+fn resolve_local_asset_path(relative_path: &str) -> PathBuf {
+    let rel = PathBuf::from(relative_path);
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        let candidate = current_dir.join(&rel);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        let candidate = exe_dir.join(&rel);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
 fn module_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp, module_id: &str) {
@@ -9819,7 +9844,6 @@ fn remove_tagged_block_case_insensitive(text: &str, start: &str, end: &str) -> S
     out
 }
 
-
 fn build_recent_chat_prompt_context(
     messages: &[Message],
     max_messages: usize,
@@ -10652,4 +10676,3 @@ fn now_unix_ms() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
-

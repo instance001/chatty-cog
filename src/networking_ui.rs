@@ -1,12 +1,6 @@
 use super::*;
 
-
-fn networking_section_heading(
-    ui: &mut egui::Ui,
-    icon: &str,
-    color: egui::Color32,
-    title: &str,
-) {
+fn networking_section_heading(ui: &mut egui::Ui, icon: &str, color: egui::Color32, title: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(icon).color(color).strong());
         ui.heading(title);
@@ -636,7 +630,11 @@ fn render_networking_received_transfers(
     }
 }
 
-fn render_networking_quick_help(ui: &mut egui::Ui, app: &mut ChattyCogApp, snapshot: &NetworkSnapshot) {
+fn render_networking_quick_help(
+    ui: &mut egui::Ui,
+    app: &mut ChattyCogApp,
+    snapshot: &NetworkSnapshot,
+) {
     egui::CollapsingHeader::new("Quick help")
         .id_salt("chattycog_networking_quick_help")
         .default_open(false)
@@ -929,7 +927,10 @@ fn render_networking_pending_requests_section(
                         "Unknown device {} [{}] requesting connection.",
                         request.device_name, request.device_id
                     ));
-                    ui.small(format!("{} | {}s ago", request.address, request.requested_secs_ago));
+                    ui.small(format!(
+                        "{} | {}s ago",
+                        request.address, request.requested_secs_ago
+                    ));
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Allow").clicked() {
@@ -1018,7 +1019,10 @@ fn render_networking_this_device_section(
             ui.label(format!("Host port: {port}"));
         }
         if !snapshot.local_presence.active_tab.trim().is_empty() {
-            ui.label(format!("Shared tab status: {}", snapshot.local_presence.active_tab));
+            ui.label(format!(
+                "Shared tab status: {}",
+                snapshot.local_presence.active_tab
+            ));
         }
         if !snapshot.local_presence.runtime_status.trim().is_empty() {
             ui.label(format!(
@@ -1217,8 +1221,7 @@ fn render_networking_workflow_bundle_section(
         "Capture the current ChattyCog setup into a portable bundle: system prompt, model hints, sampling settings, sandbox policy, and per-module AI preferences.",
     );
     ui.add(
-        egui::TextEdit::singleline(&mut app.networking_bundle_label)
-            .hint_text("Bundle title..."),
+        egui::TextEdit::singleline(&mut app.networking_bundle_label).hint_text("Bundle title..."),
     );
     ui.add(
         egui::TextEdit::multiline(&mut app.networking_bundle_summary)
@@ -1230,7 +1233,10 @@ fn render_networking_workflow_bundle_section(
             "Selected connected peers: {}",
             selected_connections.len()
         ));
-        ui.small(format!("Module prefs included: {}", app.prefs.modules.len()));
+        ui.small(format!(
+            "Module prefs included: {}",
+            app.prefs.modules.len()
+        ));
         ui.small(format!(
             "System prompt: {} chars",
             app.current_system_prompt().chars().count()
@@ -1298,14 +1304,18 @@ fn render_networking_lukewarm_share_section(
         "Share summary-only recent context with selected peers. Hot memory stays local, and cold logs are not transferred.",
     );
     let local_lukewarm_share = app.build_current_lukewarm_share();
-    let applied_lukewarm_count =
-        load_applied_lukewarm_contexts(&app.applied_lukewarm_dir()).unwrap_or_default().len();
+    let applied_lukewarm_count = load_applied_lukewarm_contexts(&app.applied_lukewarm_dir())
+        .unwrap_or_default()
+        .len();
     ui.horizontal_wrapped(|ui| {
         ui.small(format!(
             "Selected connected peers: {}",
             selected_connections.len()
         ));
-        ui.small(format!("Applied peer summaries: {}", applied_lukewarm_count));
+        ui.small(format!(
+            "Applied peer summaries: {}",
+            applied_lukewarm_count
+        ));
         ui.small(if app.prefs.network_allow_shared_lukewarm_context {
             "Shared luke warm is allowed in prompts"
         } else {
