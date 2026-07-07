@@ -91,6 +91,42 @@ pub fn read_departments_from_logs_dir(logs_dir: Option<&Path>) -> Result<String>
     read_text_file(&path, 200_000)
 }
 
+pub fn read_gguf_architecture(path: &Path) -> Result<Option<String>> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("read {}", path.display()))?;
+    if &magic != b"GGUF" {
+        return Ok(None);
+    }
+
+    let version = read_u32(&mut file)?;
+    if !(2..=3).contains(&version) {
+        return Ok(None);
+    }
+
+    let _tensor_count = read_u64(&mut file)?;
+    let kv_count = read_u64(&mut file)?;
+
+    for _ in 0..kv_count {
+        let key = read_gguf_string(&mut file)?;
+        let value_type = read_u32(&mut file)?;
+        if key == "general.architecture" {
+            if value_type == 8 {
+                return Ok(Some(read_gguf_string(&mut file)?));
+            }
+            skip_gguf_value(&mut file, value_type)?;
+            return Ok(None);
+        }
+        skip_gguf_value(&mut file, value_type)?;
+    }
+
+    Ok(None)
+}
+
 fn resolve_logs_dir(logs_dir: Option<&Path>) -> Option<PathBuf> {
     logs_dir
         .map(Path::to_path_buf)
@@ -131,6 +167,84 @@ fn read_text_file(path: &Path, max_bytes: usize) -> Result<String> {
         .read_to_end(&mut buf)
         .with_context(|| format!("read {}", path.display()))?;
     Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+fn read_u32(file: &mut std::fs::File) -> Result<u32> {
+    let mut buf = [0_u8; 4];
+    use std::io::Read;
+    file.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_u64(file: &mut std::fs::File) -> Result<u64> {
+    let mut buf = [0_u8; 8];
+    use std::io::Read;
+    file.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn read_gguf_string(file: &mut std::fs::File) -> Result<String> {
+    let len = read_u64(file)? as usize;
+    let mut buf = vec![0_u8; len];
+    use std::io::Read;
+    file.read_exact(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+fn skip_gguf_value(file: &mut std::fs::File, value_type: u32) -> Result<()> {
+    match value_type {
+        0 | 1 | 7 => skip_bytes(file, 1),
+        2 | 3 => skip_bytes(file, 2),
+        4 | 5 | 6 => skip_bytes(file, 4),
+        10 | 11 | 12 => skip_bytes(file, 8),
+        8 => {
+            let len = read_u64(file)?;
+            skip_bytes(file, len)
+        }
+        9 => {
+            let element_type = read_u32(file)?;
+            let len = read_u64(file)?;
+            if element_type == 8 {
+                for _ in 0..len {
+                    let str_len = read_u64(file)?;
+                    skip_bytes(file, str_len)?;
+                }
+                Ok(())
+            } else {
+                let element_size = gguf_primitive_size(element_type)
+                    .with_context(|| format!("unsupported GGUF array type {element_type}"))?;
+                skip_bytes(file, len.saturating_mul(element_size as u64))
+            }
+        }
+        other => anyhow::bail!("unsupported GGUF value type {other}"),
+    }
+}
+
+fn gguf_primitive_size(value_type: u32) -> Result<usize> {
+    match value_type {
+        0 | 1 | 7 => Ok(1),
+        2 | 3 => Ok(2),
+        4 | 5 | 6 => Ok(4),
+        10 | 11 | 12 => Ok(8),
+        _ => anyhow::bail!("unsupported GGUF primitive type {value_type}"),
+    }
+}
+
+fn skip_bytes(file: &mut std::fs::File, len: u64) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if len == 0 {
+        return Ok(());
+    }
+
+    match file.seek(SeekFrom::Current(len as i64)) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            let mut limited = file.take(len);
+            std::io::copy(&mut limited, &mut std::io::sink())?;
+            Ok(())
+        }
+    }
 }
 
 fn sanitize_lukewarm_summary_for_ui(raw: &str) -> String {

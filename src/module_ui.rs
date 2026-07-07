@@ -986,6 +986,19 @@ fn render_module_support_panels(
             ui.heading("Module AI");
             ui.label("This module can run its own local model while the orchestrator is paused.");
 
+            let models_dir = app.models_dir.clone();
+            let modules_dir = app.modules_dir.clone();
+            let model_opts = build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
+            let preferred_model_hint = app
+                .prefs
+                .modules
+                .get(module_id)
+                .and_then(|p| p.preferred_model.as_ref())
+                .filter(|s| !s.trim().is_empty())
+                .cloned()
+                .or_else(|| mf.default_model.clone());
+            let preferred_model_path = app.resolve_portable_model_hint(preferred_model_hint.as_deref());
+
             let st = app
                 .module_ai
                 .entry(module_id.to_string())
@@ -1000,39 +1013,14 @@ fn render_module_support_panels(
                 }
                 st.initialized = true;
             }
-
-            if st.models_cache.is_empty() {
-                st.models_cache = scan_ggufs(app.models_dir.as_deref());
-            }
             if st.model_path.is_none() {
-                let preferred = app
-                    .prefs
-                    .modules
-                    .get(module_id)
-                    .and_then(|p| p.preferred_model.as_ref())
-                    .filter(|s| !s.trim().is_empty())
-                    .cloned()
-                    .or_else(|| mf.default_model.clone());
-
-                if let Some(name) = preferred.as_ref() {
-                    if let Some(p) = st
-                        .models_cache
-                        .iter()
-                        .find(|p| {
-                            p.file_name()
-                                .map(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
-                                .unwrap_or(false)
-                        })
-                        .cloned()
-                    {
-                        st.model_path = Some(p);
-                    }
-                }
+                st.model_path = preferred_model_path;
             }
 
             ui.horizontal(|ui| {
                 if ui.button("Refresh models").clicked() {
                     st.models_cache = scan_ggufs(app.models_dir.as_deref());
+                    app.models_cache = scan_ggufs(app.models_dir.as_deref());
                 }
                 if ui.button("Stop").clicked() {
                     if let Some(c) = &st.cancel {
@@ -1044,24 +1032,38 @@ fn render_module_support_panels(
                 }
             });
 
-            egui::ComboBox::from_label("Module model")
-                .selected_text(
-                    st.model_path
-                        .as_ref()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "(none)".to_string()),
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut st.model_path, None, "(none)");
-                    for p in &st.models_cache {
-                        let label = p
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        ui.selectable_value(&mut st.model_path, Some(p.clone()), label);
-                    }
-                });
+            let selected_hint = portable_model_hint_for_dirs(
+                models_dir.as_deref(),
+                modules_dir.as_deref(),
+                st.model_path.as_deref(),
+            );
+            let selected_label = selected_model_option_label(
+                &model_opts,
+                selected_hint.as_deref(),
+                st.model_path.as_ref().map(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.display().to_string())
+                }),
+            );
+            let mut picked_model: Option<Option<String>> = None;
+            ui.horizontal(|ui| {
+                ui.label("Module model");
+                picked_model = show_grouped_model_option_combo(
+                    ui,
+                    ("module_model_combo", module_id),
+                    selected_label,
+                    &model_opts,
+                    selected_hint.as_deref(),
+                );
+            });
+            if let Some(picked) = picked_model {
+                st.model_path = resolve_portable_model_hint_for_dirs(
+                    models_dir.as_deref(),
+                    modules_dir.as_deref(),
+                    picked.as_deref(),
+                );
+            }
 
             ui.horizontal(|ui| {
                 ui.add(egui::Slider::new(&mut st.temp, 0.0..=2.0).text("temp"));

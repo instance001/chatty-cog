@@ -6,6 +6,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use anyhow::{Context, Result, anyhow};
 use libloading::{Library, Symbol};
 
+use crate::app_paths::read_gguf_architecture;
 use crate::llama_sys::*;
 
 fn llama_runtime_lock() -> MutexGuard<'static, ()> {
@@ -407,6 +408,9 @@ impl Llama {
     }
 
     fn load_model(&self, model_path: &Path, n_gpu_layers: i32) -> Result<*mut llama_model> {
+        let _ = read_gguf_architecture(model_path)
+            .with_context(|| format!("read GGUF metadata for {}", model_path.display()))?;
+
         let mut params = unsafe { (self.llama_model_default_params)() };
         params.n_gpu_layers = n_gpu_layers;
         params.use_mmap = true;
@@ -779,10 +783,6 @@ impl Llama {
         if params.n_ubatch > params.n_batch {
             params.n_ubatch = params.n_batch;
         }
-        if params.n_seq_max == 0 {
-            params.n_seq_max = 1;
-        }
-
         params.no_perf = true;
 
         let threads = std::thread::available_parallelism()

@@ -1,2 +1,0 @@
-- Recent activity centered on quick tab switches between Models and Chat plus a short greeting-heavy exchange.
-The user sent a few casual messages, and the assistant replied by steering the conversation back toward the real task instead of continuing the banter.

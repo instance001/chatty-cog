@@ -1,12 +1,52 @@
 /target/
 **/target/
 
+# Common local heavyweight model/runtime/archive artifacts should never be committed.
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.dmp
+*.stackdump
+*.zip
+*.7z
+
 # Local model blobs stay out of git; keep the folder shape only.
 /models/*
 !/models/.gitkeep
 
+# Local runtime dependencies/binaries stay out of git; keep the folder shape only.
+/runtime/*
+!/runtime/.gitkeep
+!/runtime/windows/
+/runtime/windows/*
+!/runtime/windows/.gitkeep
+
+# Local app config is machine-specific; keep the folder shape only.
+/config/*
+!/config/.gitkeep
+
+# Local sandbox working files stay out of git; keep the folder shape only.
+/Chatty_Sandbox/*
+!/Chatty_Sandbox/.gitkeep
+!/Chatty_Sandbox/scratchpad/
+/Chatty_Sandbox/scratchpad/*
+!/Chatty_Sandbox/scratchpad/.gitkeep
+
+# Local memory/log outputs are runtime artifacts; keep the folder shape only.
+/memory/*
+!/memory/.gitkeep
+
+# Optional logs folder for local diagnostics.
+/logs/*
+!/logs/.gitkeep
+
 # Module-local runtime state generated while hosted in ChattyCog.
 /modules/*/state.json
+/modules/*/bridge/*
+!/modules/*/bridge/.gitkeep
 /modules/*/bridge/status.json
 /modules/*/bridge/shared_state.json
 /modules/*/bridge/incoming_shared_state.json

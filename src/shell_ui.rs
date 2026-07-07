@@ -136,6 +136,11 @@ pub(super) fn sandbox_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     ui.add_space(8.0);
 
     ui.columns(2, |cols| {
+        let image_preview_path = app
+            .sandbox_editor_path
+            .as_ref()
+            .filter(|path| path_uses_inline_image_preview(path))
+            .cloned();
         cols[0].heading("Files");
         egui::ScrollArea::vertical()
             .id_salt("sandbox_files_scroll")
@@ -216,68 +221,90 @@ pub(super) fn sandbox_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         });
         cols[1].add_space(8.0);
         cols[1].horizontal_wrapped(|ui| {
-            if ui.button("New scratch").clicked() {
-                app.sandbox_editor_path = None;
-                app.sandbox_editor_text.clear();
-                app.sandbox_status = "New scratch buffer".to_string();
-            }
-            if ui.button("Append summary to hot memory").clicked() {
-                app.append_editor_summary_to_hot_memory();
-            }
-            if ui.button("Use as current task").clicked() {
-                app.set_task_ledger_field_from_editor(true);
-            }
-            if ui.button("Use as next step").clicked() {
-                app.set_task_ledger_field_from_editor(false);
-            }
-            if ui.button("Promote to scratchpad").clicked() {
-                app.promote_editor_text_to_scratchpad();
-            }
-            if ui.button("Promote to ledger notes").clicked() {
-                app.promote_editor_text_to_ledger_notes();
-            }
-            if ui.button("Save as...").clicked() {
-                if let Some(path) = rfd::FileDialog::new().set_directory(&dir).save_file() {
-                    match ensure_save_path_within_dir(&dir, &path).and_then(|pp| {
-                        std::fs::write(&pp, &app.sandbox_editor_text)
-                            .with_context(|| format!("write {}", pp.display()))?;
-                        Ok(pp)
-                    }) {
-                        Ok(pp) => {
-                            app.sandbox_editor_path = Some(pp.clone());
-                            app.sandbox_status = format!("Saved {}", pp.display());
+            ui.add_enabled_ui(image_preview_path.is_none(), |ui| {
+                if ui.button("New scratch").clicked() {
+                    app.sandbox_editor_path = None;
+                    app.sandbox_editor_text.clear();
+                    app.sandbox_status = "New scratch buffer".to_string();
+                }
+                if ui.button("Append summary to hot memory").clicked() {
+                    app.append_editor_summary_to_hot_memory();
+                }
+                if ui.button("Use as current task").clicked() {
+                    app.set_task_ledger_field_from_editor(true);
+                }
+                if ui.button("Use as next step").clicked() {
+                    app.set_task_ledger_field_from_editor(false);
+                }
+                if ui.button("Promote to scratchpad").clicked() {
+                    app.promote_editor_text_to_scratchpad();
+                }
+                if ui.button("Promote to ledger notes").clicked() {
+                    app.promote_editor_text_to_ledger_notes();
+                }
+                if ui.button("Save as...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().set_directory(&dir).save_file() {
+                        match ensure_save_path_within_dir(&dir, &path).and_then(|pp| {
+                            std::fs::write(&pp, &app.sandbox_editor_text)
+                                .with_context(|| format!("write {}", pp.display()))?;
+                            Ok(pp)
+                        }) {
+                            Ok(pp) => {
+                                app.sandbox_editor_path = Some(pp.clone());
+                                app.sandbox_status = format!("Saved {}", pp.display());
+                            }
+                            Err(e) => app.sandbox_status = format!("Save blocked/failed: {e}"),
                         }
-                        Err(e) => app.sandbox_status = format!("Save blocked/failed: {e}"),
                     }
                 }
-            }
-            if ui.button("Save").clicked() {
-                if let Some(path) = &app.sandbox_editor_path {
-                    match ensure_save_path_within_dir(&dir, path).and_then(|pp| {
-                        std::fs::write(&pp, &app.sandbox_editor_text)
-                            .with_context(|| format!("write {}", pp.display()))?;
-                        Ok(pp)
-                    }) {
-                        Ok(pp) => {
-                            app.sandbox_editor_path = Some(pp.clone());
-                            app.sandbox_status = format!("Saved {}", pp.display());
+                if ui.button("Save").clicked() {
+                    if let Some(path) = &app.sandbox_editor_path {
+                        match ensure_save_path_within_dir(&dir, path).and_then(|pp| {
+                            std::fs::write(&pp, &app.sandbox_editor_text)
+                                .with_context(|| format!("write {}", pp.display()))?;
+                            Ok(pp)
+                        }) {
+                            Ok(pp) => {
+                                app.sandbox_editor_path = Some(pp.clone());
+                                app.sandbox_status = format!("Saved {}", pp.display());
+                            }
+                            Err(e) => app.sandbox_status = format!("Save blocked/failed: {e}"),
                         }
-                        Err(e) => app.sandbox_status = format!("Save blocked/failed: {e}"),
+                    } else {
+                        app.sandbox_status = "No file path. Use Save as...".to_string();
                     }
-                } else {
-                    app.sandbox_status = "No file path. Use Save as...".to_string();
                 }
+            });
+            if image_preview_path.is_some() {
+                ui.small("Read-only image preview");
             }
         });
 
         egui::ScrollArea::vertical()
             .id_salt("sandbox_editor_scroll")
             .show(&mut cols[1], |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut app.sandbox_editor_text)
-                        .desired_rows(24)
-                        .code_editor(),
-                );
+                if let Some(image_path) = image_preview_path.as_ref() {
+                    if let Some(texture) = load_local_png_texture(
+                        ui.ctx(),
+                        image_path,
+                        &format!("sandbox_preview_{}", image_path.display()),
+                    ) {
+                        ui.small("PNG preview");
+                        ui.add_space(6.0);
+                        let size = texture.size_vec2();
+                        let max = egui::vec2(720.0, 520.0);
+                        let scale = (max.x / size.x).min(max.y / size.y).min(1.0);
+                        ui.image((texture.id(), size * scale));
+                    } else {
+                        ui.small("Could not preview this image file.");
+                    }
+                } else {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut app.sandbox_editor_text)
+                            .desired_rows(24)
+                            .code_editor(),
+                    );
+                }
             });
     });
 }

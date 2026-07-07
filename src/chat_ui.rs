@@ -127,6 +127,7 @@ pub(super) fn render_chat_lukewarm_panel(
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_min_height(panel_height);
+        ui.set_height(panel_height);
         ui.set_max_width(ui.available_width());
         ui.heading("Luke Warm");
         ui.add(
@@ -143,16 +144,18 @@ pub(super) fn render_chat_lukewarm_panel(
             app.lukewarm_summary.clone()
         };
 
+        let body_height = (panel_height - 64.0).max(160.0);
         egui::ScrollArea::vertical()
             .id_salt("chat_lukewarm_scroll")
-            .max_height((panel_height - 64.0).max(120.0))
-            .auto_shrink([true, false])
+            .max_height(body_height)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Frame::none()
                     .fill(ui.visuals().extreme_bg_color)
                     .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        ui.set_min_height((body_height - 12.0).max(120.0));
                         ui.add(egui::Label::new(text.as_str()).wrap());
                     });
             });
@@ -320,43 +323,31 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     }
     let model_opts = build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
     let selected_hint = app.portable_model_hint(app.gguf_path.as_deref());
-    let selected_label = selected_hint
-        .as_ref()
-        .and_then(|hint| {
-            model_opts
-                .iter()
-                .find(|option| option.value == *hint)
-                .map(|option| option.label.clone())
-        })
-        .or_else(|| {
-            app.gguf_path.as_ref().map(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string())
-            })
-        })
-        .unwrap_or_else(|| "(none)".to_string());
+    let selected_label = selected_model_option_label(
+        &model_opts,
+        selected_hint.as_deref(),
+        app.gguf_path.as_ref().map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string())
+        }),
+    );
 
     ui.horizontal_wrapped(|ui| {
         ui.small("Model");
-        egui::ComboBox::from_id_salt("chat_model_combo")
-            .selected_text(selected_label)
-            .width(260.0)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(app.gguf_path.is_none(), "(none)")
-                    .clicked()
-                {
-                    app.set_active_chat_model_path(None);
-                }
-                for option in &model_opts {
-                    let selected = selected_hint.as_deref() == Some(option.value.as_str());
-                    if ui.selectable_label(selected, &option.label).clicked() {
-                        let path = app.resolve_portable_model_hint(Some(&option.value));
-                        app.set_active_chat_model_path(path);
-                    }
-                }
-            });
+        ui.scope(|ui| {
+            ui.set_min_width(260.0);
+            if let Some(picked) = show_grouped_model_option_combo(
+                ui,
+                "chat_model_combo",
+                selected_label,
+                &model_opts,
+                selected_hint.as_deref(),
+            ) {
+                let path = app.resolve_portable_model_hint(picked.as_deref());
+                app.set_active_chat_model_path(path);
+            }
+        });
         if ui.button("Open GGUF...").clicked() {
             let mut dialog = rfd::FileDialog::new().add_filter("GGUF", &["gguf"]);
             if let Some(dir) = &app.models_dir {
@@ -371,6 +362,113 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         }
         ui.small(format!("Max tokens {}", app.orch_max_tokens));
     });
+    if let Some(path) = app.gguf_path.as_deref()
+        && let Some(status) = selected_model_inline_status(
+            path,
+            app.model_runtime_issues
+                .get(&path.to_string_lossy().to_string())
+                .map(String::as_str),
+        )
+    {
+        let vision_explanation = selected_model_vision_explanation(path);
+        let runtime_issue = app
+            .model_runtime_issues
+            .get(&path.to_string_lossy().to_string())
+            .cloned();
+        let selected_chat_image = app
+            .chat_selected_file
+            .as_ref()
+            .filter(|path| path.is_file() && path_looks_like_image(path))
+            .cloned();
+        let selected_sandbox_image = app
+            .sandbox_selected
+            .as_ref()
+            .filter(|path| path.is_file() && path_looks_like_image(path))
+            .cloned();
+        let selected_image = selected_chat_image
+            .clone()
+            .or_else(|| selected_sandbox_image.clone());
+        let vision_ready = selected_model_is_vision_ready(path);
+        let selected_image_label = selected_image
+            .as_ref()
+            .map(|image_path| format_chat_selected_file_label(image_path, app.sandbox_dir.as_deref()));
+        let selected_image_source = if selected_chat_image.is_some() {
+            Some("chat selection")
+        } else if selected_sandbox_image.is_some() {
+            Some("sandbox selection")
+        } else {
+            None
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.small("Selected:");
+            ui.small(status);
+            if let Some(label) = selected_image_label.as_deref() {
+                let image_label_response = ui.small(format!("Image: {label}"));
+                if let Some(image_path) = selected_image.as_ref() {
+                    let texture_name =
+                        format!("chat_selected_preview_{}", image_path.display());
+                    if let Some(texture) =
+                        load_local_png_texture(ui.ctx(), image_path, &texture_name)
+                    {
+                        image_label_response.on_hover_ui(|ui| {
+                            ui.set_max_width(220.0);
+                            ui.small("Preview");
+                            let size = texture.size_vec2();
+                            let max = egui::vec2(200.0, 140.0);
+                            let scale = (max.x / size.x).min(max.y / size.y).min(1.0);
+                            ui.image((texture.id(), size * scale));
+                        });
+                    }
+                }
+                if let Some(source) = selected_image_source {
+                    ui.small(format!("({source})"));
+                }
+                if ui.button("Open image").clicked() {
+                    if let Some(image_path) = selected_image.as_ref() {
+                        app.open_sandbox_file_and_focus_tab(image_path);
+                    }
+                }
+            }
+            let button = ui.add_enabled(
+                vision_ready && selected_image.is_some() && !app.is_generating,
+                egui::Button::new("Test vision"),
+            );
+            if button.clicked() {
+                if let Some(image_path) = selected_image {
+                    app.runtime_status = format!(
+                        "Runtime: testing vision with {}.",
+                        format_chat_selected_file_label(&image_path, app.sandbox_dir.as_deref())
+                    );
+                    app.start_multimodal_generation(
+                        "Describe this image in a concise but useful paragraph.".to_string(),
+                        image_path,
+                    );
+                }
+            }
+        });
+        if let Some(explanation) = vision_explanation.as_deref() {
+            ui.small(explanation);
+        }
+        if let Some(issue) = runtime_issue.as_deref() {
+            ui.small(issue);
+        }
+        if !app.is_generating && !vision_ready {
+            ui.small("Vision test unavailable: current model is not vision-ready.");
+        } else if !app.is_generating
+            && app
+                .chat_selected_file
+                .as_ref()
+                .filter(|path| path.is_file() && path_looks_like_image(path))
+                .is_none()
+            && app
+                .sandbox_selected
+                .as_ref()
+                .filter(|path| path.is_file() && path_looks_like_image(path))
+                .is_none()
+        {
+            ui.small("Vision test needs a selected image file from the sandbox.");
+        }
+    }
 }
 
 fn render_chat_voice_summary(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
@@ -479,10 +577,78 @@ fn render_sandbox_task_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     ui.group(|ui| {
         let sandbox_mode_available =
             app.prefs.allow_sandbox_tool_requests && app.sandbox_dir.is_some();
+        let sandbox_files = app
+            .sandbox_dir
+            .as_deref()
+            .map(list_sandbox_files)
+            .unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut app.sandbox_task_enabled, "Sandbox task");
             ui.small("Mark this turn as a sandbox file request so the model skips the guesswork.");
         });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Sandbox file:");
+            ui.add_enabled_ui(sandbox_mode_available, |ui| {
+                let selected_label = if app.sandbox_task_path.trim().is_empty() {
+                    "Select sandbox file...".to_string()
+                } else {
+                    app.sandbox_task_path.clone()
+                };
+                egui::ComboBox::from_id_salt("chat_sandbox_task_picker")
+                    .selected_text(selected_label)
+                    .width(260.0)
+                    .show_ui(ui, |ui| {
+                        for path in &sandbox_files {
+                            if let Some(dir) = app.sandbox_dir.as_deref() {
+                                let rel = path
+                                    .strip_prefix(dir)
+                                    .unwrap_or(path)
+                                    .to_string_lossy()
+                                    .replace('\\', "/");
+                                if ui
+                                    .selectable_label(app.sandbox_task_path == rel, &rel)
+                                    .clicked()
+                                {
+                                    app.sandbox_task_path = rel;
+                                }
+                            }
+                        }
+                    });
+                if ui
+                    .add_enabled(
+                        app.sandbox_selected.is_some(),
+                        egui::Button::new("Use open file"),
+                    )
+                    .clicked()
+                {
+                    if let (Some(dir), Some(path)) =
+                        (app.sandbox_dir.as_deref(), app.sandbox_selected.as_ref())
+                    {
+                        if let Ok(rel) = path.strip_prefix(dir) {
+                            app.sandbox_task_path = rel.to_string_lossy().replace('\\', "/");
+                            app.chat_selected_file = Some(path.clone());
+                            let file_label = format_chat_selected_file_label(path, app.sandbox_dir.as_deref());
+                            app.runtime_status = if path_looks_like_image(path) {
+                                format!("Runtime: selected image {file_label} for the next multimodal turn.")
+                            } else {
+                                format!("Runtime: selected file {file_label} for the next turn.")
+                            };
+                        }
+                    }
+                }
+            });
+        });
+        if let Some(path) = app.chat_selected_file.clone() {
+            let file_label = format_chat_selected_file_label(&path, app.sandbox_dir.as_deref());
+            ui.horizontal_wrapped(|ui| {
+                ui.small(format!("Using selected file on next send: {file_label}"));
+                if ui.button("Clear file").clicked() {
+                    app.chat_selected_file = None;
+                    app.runtime_status = "Runtime: cleared selected file for chat.".to_string();
+                }
+            });
+        }
         if app.sandbox_task_enabled {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -519,16 +685,28 @@ fn render_sandbox_task_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                     "Sandbox task mode needs `Allow sandbox tool requests` enabled and a live `Chatty_Sandbox/` folder.",
                 );
             } else if normalized_path.is_empty() {
-                ui.small("Enter a sandbox `.md` or `.txt` path for this task.");
-            } else if let Err(err) = sandbox_ai_text_guard(&normalized_path) {
+                ui.small("Enter a sandbox target path for this task.");
+            } else if let Err(err) = if sandbox_rel_path_looks_like_image(&normalized_path) {
+                sandbox_ai_read_guard(&normalized_path)
+            } else {
+                sandbox_ai_text_guard(&normalized_path)
+            } {
                 ui.small(format!("Sandbox path blocked: {err}"));
             } else {
+                let action_summary = if sandbox_rel_path_looks_like_image(&normalized_path) {
+                    "inspect"
+                } else {
+                    app.sandbox_task_intent.summary_verb()
+                };
                 ui.small(format!(
-                    "This turn will explicitly tell the AI to {} `Chatty_Sandbox/{}`.",
-                    app.sandbox_task_intent.summary_verb(),
+                    "This turn will explicitly tell the AI to {action_summary} `Chatty_Sandbox/{}`.",
                     normalized_path
                 ));
             }
+        } else if !sandbox_mode_available {
+            ui.small(
+                "Sandbox picker needs `Allow sandbox tool requests` enabled and a live `Chatty_Sandbox/` folder.",
+            );
         }
     });
 }
@@ -681,8 +859,23 @@ fn render_chat_columns(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     let panel_height = ui.available_height().max(320.0);
     let gap = 10.0;
     let total_width = ui.available_width();
-    let side_width = ((total_width - (gap * 2.0) - 320.0) * 0.5).clamp(220.0, 320.0);
-    let center_width = (total_width - (side_width * 2.0) - (gap * 2.0)).max(320.0);
+    let min_side_width = 200.0;
+    let max_side_width = 320.0;
+    let min_center_width = 320.0;
+    let min_total_for_three = (min_side_width * 2.0) + min_center_width + (gap * 2.0);
+
+    if total_width < min_total_for_three {
+        render_chat_columns_stacked(ui, app, panel_height, gap);
+        return;
+    }
+
+    let preferred_side_width =
+        ((total_width - min_center_width - (gap * 2.0)) * 0.5).clamp(min_side_width, max_side_width);
+    let center_width =
+        (total_width - (preferred_side_width * 2.0) - (gap * 2.0)).max(min_center_width);
+    let side_width = ((total_width - center_width - (gap * 2.0)) * 0.5)
+        .clamp(min_side_width, max_side_width);
+
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
             egui::vec2(side_width, panel_height),
@@ -718,6 +911,50 @@ fn render_chat_columns(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     });
 }
 
+fn render_chat_columns_stacked(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_height: f32, gap: f32) {
+    let top_panel_height = (panel_height * 0.40).clamp(220.0, 360.0);
+    let bottom_panel_height = (panel_height - top_panel_height - gap).max(260.0);
+
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), top_panel_height),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            let half_gap = gap * 0.5;
+            let side_width = ((ui.available_width() - half_gap) * 0.5).max(180.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(side_width, top_panel_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(side_width);
+                    ui.set_max_width(side_width);
+                    render_chat_hot_memory_panel(ui, app, top_panel_height);
+                },
+            );
+            ui.add_space(half_gap);
+            ui.allocate_ui_with_layout(
+                egui::vec2(side_width, top_panel_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(side_width);
+                    ui.set_max_width(side_width);
+                    render_chat_lukewarm_panel(ui, app, top_panel_height);
+                },
+            );
+        },
+    );
+
+    ui.add_space(gap);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), bottom_panel_height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
+            render_chat_transcript(ui, app, bottom_panel_height);
+        },
+    );
+}
+
 fn render_chat_transcript(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_height: f32) {
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::same(10.0))
@@ -725,6 +962,7 @@ fn render_chat_transcript(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_heigh
             let transcript_width = ui.available_width();
             ui.set_width(transcript_width);
             ui.set_max_width(transcript_width);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.heading("Chat");
             ui.add_space(6.0);
             egui::ScrollArea::vertical()
@@ -736,6 +974,7 @@ fn render_chat_transcript(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_heigh
                     let scroll_width = ui.available_width();
                     ui.set_width(scroll_width);
                     ui.set_max_width(scroll_width);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     for msg in &app.messages {
                         message_bubble(ui, msg);
                     }
@@ -780,6 +1019,7 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
         |ui| {
             ui.set_width(width);
             ui.set_max_width(width);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             egui::Frame::none()
                 .fill(fill)
                 .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.45)))
@@ -790,7 +1030,10 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
                     ui.horizontal(|ui| {
                         ui.colored_label(color, label);
                     });
-                    ui.add(egui::Label::new(msg.content.clone()).wrap());
+                    ui.add(
+                        egui::Label::new(msg.content.clone())
+                            .wrap_mode(egui::TextWrapMode::Wrap),
+                    );
                     if matches!(msg.role, Role::Assistant) {
                         if let Some(thinking) = msg
                             .thinking
@@ -857,11 +1100,12 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         ui.set_max_width(ui.available_width());
+                                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                         ui.add(
                                             egui::Label::new(
                                                 egui::RichText::new(thinking).monospace(),
                                             )
-                                            .wrap(),
+                                            .wrap_mode(egui::TextWrapMode::Wrap),
                                         );
                                     });
                             }

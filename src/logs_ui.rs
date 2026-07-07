@@ -42,35 +42,28 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     if app.models_cache.is_empty() {
         app.models_cache = scan_ggufs(app.models_dir.as_deref());
     }
+    let model_opts = build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
+    let selected_hint = app.portable_model_hint(app.bookkeeper_model_path.as_deref());
+    let selected_label = selected_model_option_label(
+        &model_opts,
+        selected_hint.as_deref(),
+        app.bookkeeper_model_path.as_ref().map(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.display().to_string())
+        }),
+    );
 
-    egui::ComboBox::from_id_salt("bookkeeper_model_combo")
-        .selected_text(
-            app.bookkeeper_model_path
-                .as_ref()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "(none)".to_string()),
-        )
-        .show_ui(ui, |ui| {
-            if ui
-                .selectable_value(&mut app.bookkeeper_model_path, None, "(none)")
-                .changed()
-            {
-                app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
-            }
-            for p in &app.models_cache {
-                let label = p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if ui
-                    .selectable_value(&mut app.bookkeeper_model_path, Some(p.clone()), label)
-                    .changed()
-                {
-                    app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
-                }
-            }
-        });
+    if let Some(picked) = show_grouped_model_option_combo(
+        ui,
+        "bookkeeper_model_combo",
+        selected_label,
+        &model_opts,
+        selected_hint.as_deref(),
+    ) {
+        app.bookkeeper_model_path = app.resolve_portable_model_hint(picked.as_deref());
+        app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
+    }
 
     if ui.button("Pick model...").clicked() {
         let mut dialog = rfd::FileDialog::new().add_filter("GGUF", &["gguf"]);

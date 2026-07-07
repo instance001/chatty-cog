@@ -195,6 +195,7 @@ impl ChattyCogApp {
         let mut status_lines = Vec::new();
         let mut result_lines = Vec::new();
         let mut last_opened: Option<PathBuf> = None;
+        let mut selected_image_for_continuation: Option<PathBuf> = None;
         for action in self.pending_sandbox_actions.drain(..) {
             match action {
                 SandboxAction::Write { path, contents } => {
@@ -233,22 +234,49 @@ impl ChattyCogApp {
                         Err(e) => status_lines.push(format!("Append blocked/failed ({path}): {e}")),
                     }
                 }
-                SandboxAction::Read { path } => match sandbox_ai_text_guard(&path)
-                    .and_then(|_| sandbox_read(&dir, &path, 200_000))
-                {
-                    Ok(s) => {
-                        let preview = truncate_for_ui(&s, 400);
-                        status_lines.push(format!("Read {path}: {preview}"));
-                        result_lines.push(format!(
-                            "sandbox.read `{path}` succeeded.\n{}",
-                            truncate_for_ui(&s, 4_000)
-                        ));
-                        if let Ok(rel) = parse_sandbox_rel_path(&path) {
-                            last_opened = Some(dir.join(rel));
+                SandboxAction::Read { path } => {
+                    if sandbox_rel_path_looks_like_image(&path) {
+                        match sandbox_ai_read_guard(&path).and_then(|_| {
+                            let rel = parse_sandbox_rel_path(&path)?;
+                            ensure_path_within_dir(&dir, &dir.join(rel))
+                        }) {
+                            Ok(image_path) => {
+                                let file_label = image_path
+                                    .strip_prefix(&dir)
+                                    .unwrap_or(&image_path)
+                                    .to_string_lossy()
+                                    .replace('\\', "/");
+                                status_lines.push(format!("Selected image {file_label} for inspection"));
+                                result_lines.push(format!(
+                                    "sandbox.read `{path}` succeeded.\nAttached sandbox image `{file_label}` for multimodal inspection on the continuation turn."
+                                ));
+                                last_opened = Some(image_path.clone());
+                                selected_image_for_continuation = Some(image_path.clone());
+                                self.chat_selected_file = Some(image_path);
+                            }
+                            Err(e) => {
+                                status_lines.push(format!("Read blocked/failed ({path}): {e}"))
+                            }
+                        }
+                    } else {
+                        match sandbox_ai_read_guard(&path)
+                            .and_then(|_| sandbox_read(&dir, &path, 200_000))
+                        {
+                            Ok(s) => {
+                                let preview = truncate_for_ui(&s, 400);
+                                status_lines.push(format!("Read {path}: {preview}"));
+                                result_lines.push(format!(
+                                    "sandbox.read `{path}` succeeded.\n{}",
+                                    truncate_for_ui(&s, 4_000)
+                                ));
+                                if let Ok(rel) = parse_sandbox_rel_path(&path) {
+                                    last_opened = Some(dir.join(rel));
+                                }
+                            }
+                            Err(e) => status_lines.push(format!("Read blocked/failed ({path}): {e}")),
                         }
                     }
-                    Err(e) => status_lines.push(format!("Read blocked/failed ({path}): {e}")),
-                },
+                }
                 SandboxAction::List => match sandbox_list(&dir) {
                     Ok(items) => {
                         let preview = if items.is_empty() {
@@ -390,11 +418,20 @@ impl ChattyCogApp {
             }
         }
 
-        if continue_after && !self.is_generating && !self.sandbox_last_tool_result.trim().is_empty()
-        {
-            self.start_generation(
-                "Continue from the approved sandbox tool result and help with the current task. If another sandbox action is needed, request it as JSON.".to_string(),
-            );
+        if continue_after && !self.is_generating && !self.sandbox_last_tool_result.trim().is_empty() {
+            let continuation_prompt =
+                "Continue from the approved sandbox tool result and help with the current task. If another sandbox action is needed, request it as JSON.".to_string();
+            if let Some(image_path) = selected_image_for_continuation
+                && self
+                    .gguf_path
+                    .as_deref()
+                    .map(selected_model_is_vision_ready)
+                    .unwrap_or(false)
+            {
+                self.start_multimodal_generation(continuation_prompt, image_path);
+            } else {
+                self.start_generation(continuation_prompt);
+            }
         }
     }
 }

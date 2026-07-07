@@ -20,7 +20,8 @@ mod sandbox_ops;
 mod shell_ui;
 use chattycog_gui::app_paths::{
     find_default_logs_dir, find_models_dir, find_modules_dir, find_or_create_sandbox_dir,
-    find_runtime_windows_dir, read_departments_from_logs_dir, read_lukewarm_from_logs_dir,
+    find_runtime_windows_dir, read_departments_from_logs_dir, read_gguf_architecture,
+    read_lukewarm_from_logs_dir,
 };
 use chattycog_gui::llama_dyn;
 use chattycog_gui::memory::bookkeeper::{
@@ -610,9 +611,35 @@ const DEFAULT_SANDBOX_SCRATCHPAD_REL_PATH: &str = "scratchpad/current.md";
 const DEFAULT_SANDBOX_TASK_LEDGER_REL_PATH: &str = "scratchpad/task_ledger.md";
 
 #[derive(Debug, Clone)]
+enum ModelOptionGroup {
+    VisionReady,
+    VisionNeedsMmproj,
+    Standard,
+}
+
+impl ModelOptionGroup {
+    fn rank(&self) -> u8 {
+        match self {
+            Self::VisionReady => 0,
+            Self::VisionNeedsMmproj => 1,
+            Self::Standard => 2,
+        }
+    }
+
+    fn heading(&self) -> &'static str {
+        match self {
+            Self::VisionReady => "Vision Ready",
+            Self::VisionNeedsMmproj => "Vision Needs Projector",
+            Self::Standard => "Text / Other Models",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct ModelOption {
     label: String,
     value: String, // stored in prefs; either a filename or "modules/<module_id>/<file>.gguf"
+    group: ModelOptionGroup,
 }
 
 #[derive(Debug, Clone)]
@@ -1261,6 +1288,7 @@ struct ChattyCogApp {
     gen_rx: Option<Receiver<GenEvent>>,
     assistant_draft: String,
     runtime_status: String,
+    model_runtime_issues: HashMap<String, String>,
     runtime_info_rx: Option<Receiver<String>>,
     bookkeeper: Option<BookkeeperHandle>,
     logs_dir: Option<PathBuf>,
@@ -1317,6 +1345,7 @@ struct ChattyCogApp {
     sandbox_editor_text: String,
     sandbox_status: String,
     sandbox_last_tool_result: String,
+    chat_selected_file: Option<PathBuf>,
     sandbox_task_nudge: String,
     sandbox_task_enabled: bool,
     sandbox_task_intent: SandboxTaskIntent,
@@ -1448,6 +1477,7 @@ impl ChattyCogApp {
             gen_rx: None,
             assistant_draft: String::new(),
             runtime_status: "Runtime: probing...".to_string(),
+            model_runtime_issues: HashMap::new(),
             runtime_info_rx: start_runtime_info_probe(),
             logs_dir: find_default_logs_dir(),
             logs_selected: None,
@@ -1495,6 +1525,7 @@ impl ChattyCogApp {
             sandbox_editor_text: String::new(),
             sandbox_status: String::new(),
             sandbox_last_tool_result: String::new(),
+            chat_selected_file: None,
             sandbox_task_nudge: String::new(),
             sandbox_task_enabled: false,
             sandbox_task_intent: SandboxTaskIntent::Create,
@@ -1776,7 +1807,29 @@ impl ChattyCogApp {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| selected.display().to_string());
-            self.runtime_status = format!("Runtime: selected model {label}");
+            self.runtime_status = match read_gguf_architecture(&selected) {
+                Ok(Some(architecture)) => {
+                    let readiness = if architecture_supports_mtmd(&selected, Some(&architecture)) {
+                        if let Some(mmproj) =
+                            find_matching_mmproj_path(&selected, Some(&architecture))
+                        {
+                            format!(
+                                " | vision ready via {}",
+                                mmproj.file_name().unwrap_or_default().to_string_lossy()
+                            )
+                        } else {
+                            " | current local runtime needs a matching projector".to_string()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    format!("Runtime: selected model {label} [{architecture}]{readiness}")
+                }
+                Ok(None) => format!("Runtime: selected model {label}"),
+                Err(err) => format!(
+                    "Runtime: selected model {label} (could not read GGUF metadata: {err})"
+                ),
+            };
             if let Some(bk) = &self.bookkeeper {
                 bk.append(MemoryEvent {
                     ts_unix_ms: now_unix_ms(),
@@ -4621,73 +4674,19 @@ impl ChattyCogApp {
     }
 
     fn portable_model_hint(&self, path: Option<&Path>) -> Option<String> {
-        let path = path?;
-        if let Some(modules_dir) = &self.modules_dir {
-            if let Ok(rel) = path.strip_prefix(modules_dir) {
-                return Some(format!(
-                    "modules/{}",
-                    rel.to_string_lossy().replace('\\', "/")
-                ));
-            }
-        }
-        if let Some(models_dir) = &self.models_dir {
-            if let Ok(rel) = path.strip_prefix(models_dir) {
-                return Some(rel.to_string_lossy().replace('\\', "/"));
-            }
-        }
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_string())
+        portable_model_hint_for_dirs(
+            self.models_dir.as_deref(),
+            self.modules_dir.as_deref(),
+            path,
+        )
     }
 
     fn resolve_portable_model_hint(&self, hint: Option<&str>) -> Option<PathBuf> {
-        let hint = hint?.trim();
-        if hint.is_empty() {
-            return None;
-        }
-
-        if let Some(rest) = hint.strip_prefix("modules/") {
-            let path = self.modules_dir.as_ref()?.join(rest.replace('/', "\\"));
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-
-        if let Some(models_dir) = &self.models_dir {
-            let direct = models_dir.join(hint.replace('/', "\\"));
-            if direct.is_file() {
-                return Some(direct);
-            }
-            let by_name = models_dir.join(hint);
-            if by_name.is_file() {
-                return Some(by_name);
-            }
-        }
-
-        let file_name = Path::new(hint)
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| hint.to_string());
-
-        for candidate in scan_ggufs(self.models_dir.as_deref()) {
-            if candidate
-                .file_name()
-                .map(|name| name.to_string_lossy().eq_ignore_ascii_case(&file_name))
-                .unwrap_or(false)
-            {
-                return Some(candidate);
-            }
-        }
-        for candidate in scan_ggufs_in_modules(self.modules_dir.as_deref()) {
-            if candidate
-                .file_name()
-                .map(|name| name.to_string_lossy().eq_ignore_ascii_case(&file_name))
-                .unwrap_or(false)
-            {
-                return Some(candidate);
-            }
-        }
-
-        None
+        resolve_portable_model_hint_for_dirs(
+            self.models_dir.as_deref(),
+            self.modules_dir.as_deref(),
+            hint,
+        )
     }
 
     fn build_current_workflow_bundle(&self) -> WorkflowBundle {
@@ -7041,123 +7040,12 @@ impl ChattyCogApp {
         let orch_top_k = self.orch_top_k;
         let orch_max_tokens = self.orch_max_tokens;
         let runtime_dir = find_runtime_windows_dir();
-        let mut base_system = self
-            .messages
-            .iter()
-            .find(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
-            .unwrap_or_else(default_orchestrator_system_prompt);
-        if base_system.trim() == "You are ChattyCog. Respond concisely and helpfully." {
-            base_system = default_orchestrator_system_prompt();
-        }
-        if let Some(capsule) = self.active_orchestrator_capsule() {
-            base_system.push_str("\n\n### ACTIVE CAPSULE\n");
-            base_system.push_str(
-                "The user explicitly selected this reusable behavior/personality capsule for the current task. Follow it as a style and persona layer unless the current request clearly needs otherwise.\n",
-            );
-            base_system.push_str(&capsule.text);
-            base_system.push('\n');
-        }
-
-        let mut departments_context =
-            read_departments_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
-        // Defensive: if a summarizer ever echoes placeholder text, strip it before injection to avoid prompt bloat.
-        if departments_context.contains("<bullet>") || departments_context.contains("<paragraph>") {
-            departments_context = departments_context
-                .replace("<bullet>", "")
-                .replace("<paragraph>", "");
-        }
-        let lukewarm_context =
-            read_lukewarm_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
         let model_label = gguf
             .as_ref()
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "(no GGUF selected)".to_string());
-        let mut system = base_system;
-        system.push_str("\n\n### CHATTYCOG COCKPIT ORIENTATION\n");
-        system.push_str(&build_wakeup_orientation(
-            &model_label,
-            self.sandbox_dir.is_some(),
-            self.module_registry.modules.len(),
-            self.prefs.allow_sandbox_tool_requests,
-        ));
-        system.push('\n');
-        if !departments_context.trim().is_empty() {
-            system.push_str("\n\n### BACKGROUND MEMORY: DEPARTMENT STATUS\n");
-            system.push_str("These are older module rundowns for continuity. They are not the user's current request. Use them only if the current user message clearly asks for or depends on them.\n");
-            system.push_str(&truncate_for_ui(departments_context.trim(), 2_000));
-            system.push('\n');
-        }
-        if !lukewarm_context.trim().is_empty() {
-            system.push_str("\n### BACKGROUND MEMORY: RECENT ACTIVITY\n");
-            system.push_str("This is a rolling summary, not an instruction. Do not continue old tasks unless the user asks.\n");
-            system.push_str(&truncate_for_ui(lukewarm_context.trim(), 1_200));
-            system.push('\n');
-        }
-        let shared_lukewarm_context = self.build_applied_lukewarm_prompt_block();
-        if !shared_lukewarm_context.trim().is_empty() {
-            system.push_str("\n### BACKGROUND MEMORY: NETWORK-SHARED CONTEXT\n");
-            system.push_str("This context came from another local ChattyCog peer. Treat it as optional background unless the current user message refers to it.\n");
-            system.push_str(&truncate_for_ui(shared_lukewarm_context.trim(), 1_600));
-            system.push('\n');
-        }
-        let recent_chat_context = build_recent_chat_prompt_context(&self.messages, 8, 6_000);
-        if !recent_chat_context.trim().is_empty() {
-            system.push_str("\n### RECENT CHAT CONTEXT\n");
-            system.push_str("Previous turns are context only. The current user message is the immediate task.\n");
-            system.push_str(&recent_chat_context);
-            system.push('\n');
-        }
-        let sandbox_context = build_sandbox_prompt_context(
-            self.sandbox_dir.as_deref(),
-            DEFAULT_SANDBOX_SCRATCHPAD_REL_PATH,
-            DEFAULT_SANDBOX_TASK_LEDGER_REL_PATH,
-        );
-        if !sandbox_context.trim().is_empty() {
-            system.push_str("\n### LOCAL SANDBOX CONTEXT\n");
-            system.push_str("This describes local files available through approved sandbox actions. Do not summarize the sandbox unless it helps answer the current user message.\n");
-            system.push_str(&sandbox_context);
-            system.push('\n');
-        }
-        if !self.sandbox_last_tool_result.trim().is_empty() {
-            system.push_str("\n### LAST SANDBOX TOOL RESULT\n");
-            system.push_str(&truncate_for_ui(
-                self.sandbox_last_tool_result.trim(),
-                5_000,
-            ));
-            system.push('\n');
-        }
-        if let Some(task_ledger_nudge) =
-            build_task_ledger_prompt_nudge(&prompt, self.sandbox_dir.as_deref())
-        {
-            system.push_str("\n### TASK LEDGER NUDGE\n");
-            system.push_str(&task_ledger_nudge);
-            system.push('\n');
-        }
-        if self.prefs.allow_sandbox_tool_requests {
-            system.push_str(
-                "\n### SANDBOX TOOL POLICY\n\
-You cannot read or write files directly, but you can request sandbox actions for the user to approve.\n\
-The persistent working scratchpad lives at `scratchpad/current.md` inside `Chatty_Sandbox/`.\n\
-AI sandbox file actions are limited to plain text notes only: `.txt` and `.md` files.\n\
-Only request sandbox actions when they are useful for the user's current request. Do not emit tool JSON during ordinary conversation, greetings, or orientation unless the user asks you to inspect or update files.\n\
-Use the scratchpad to keep durable notes, extracted facts, intermediate plans, and reminders that should survive context-window pressure when the current task benefits from that.\n\
-The structured task ledger lives at `scratchpad/task_ledger.md` and is the best place to keep the current task, next step, open questions, and files touched.\n\
-For longer tasks, update the task ledger whenever the plan meaningfully changes.\n\
-For complex or multi-step tasks, prefer a deterministic preload first so you can inspect the sandbox state before acting.\n\
-When you do need sandbox help, output one or more JSON objects, each on its own line and with no surrounding commentary, using one of:\n\
-  {\"tool\":\"sandbox.write\",\"path\":\"notes/Ready.md\",\"contents\":\"...\"}\n\
-  {\"tool\":\"sandbox.append\",\"path\":\"scratchpad/current.md\",\"contents\":\"\\n- new note\"}\n\
-  {\"tool\":\"sandbox.read\",\"path\":\"notes/Ready.md\"}\n\
-  {\"tool\":\"sandbox.list\"}\n\
-  {\"tool\":\"sandbox.ledger\",\"status\":\"active\",\"current_task\":\"...\",\"next_step\":\"...\",\"open_questions\":[\"...\"],\"files_touched\":[\"notes/brief.md\"],\"notes\":[\"...\"]}\n\
-  {\"tool\":\"sandbox.preload\",\"paths\":[\"notes/brief.md\",\"plans/today.md\"],\"include_list\":true,\"include_scratchpad\":true,\"include_ledger\":true,\"note\":\"load planning context first\"}\n\
-After approval, the sandbox result will be returned to you on the next turn.\n",
-            );
-        } else {
-            system.push_str("\n### SANDBOX TOOL POLICY\nSandbox tool requests are disabled. Do not request file operations.\n");
-        }
+        let system = self.build_generation_system_prompt(&prompt, &model_label);
 
         std::thread::spawn(move || {
             if gguf.is_none() {
@@ -7217,6 +7105,228 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         self.gen_rx = Some(rx);
         self.assistant_draft.clear();
         self.scroll_to_bottom = true;
+    }
+
+    fn start_multimodal_generation(&mut self, prompt: String, image_path: PathBuf) {
+        if self.is_generating {
+            return;
+        }
+        if self.orch_freeze_pending || matches!(&self.tab, Tab::Module(_)) {
+            self.runtime_status = "Runtime: orchestrator paused (module active)".to_string();
+            return;
+        }
+
+        let Some(model_path) = self.gguf_path.clone() else {
+            self.runtime_status = "Runtime: no GGUF selected for multimodal chat.".to_string();
+            return;
+        };
+        let runtime_dir = match find_runtime_windows_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                self.runtime_status = format!("Runtime: {err:#}");
+                return;
+            }
+        };
+        let architecture = read_gguf_architecture(&model_path).ok().flatten();
+        if !architecture_supports_mtmd(&model_path, architecture.as_deref()) {
+            let label = model_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| model_path.display().to_string());
+            self.runtime_status = format!(
+                "Runtime: selected image needs a multimodal-capable local runtime path. Current model {label} is not detected as ready for this path."
+            );
+            return;
+        }
+        let Some(mmproj_path) = find_matching_mmproj_path(&model_path, architecture.as_deref()) else {
+            let arch_label = architecture.unwrap_or_else(|| "unknown".to_string());
+            self.runtime_status = format!(
+                "Runtime: no matching mmproj file found for multimodal model architecture {arch_label}. Add a projector GGUF near the model first."
+            );
+            return;
+        };
+
+        self.pulse_ecg(90.0, "Generating a multimodal chat response with the local model.");
+
+        let (tx, rx) = crossbeam_channel::unbounded::<GenEvent>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = Arc::clone(&cancel);
+        let orch_temp = self.orch_temp;
+        let orch_top_p = self.orch_top_p;
+        let orch_top_k = self.orch_top_k;
+        let orch_max_tokens = self.orch_max_tokens;
+        let model_label = model_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| model_path.display().to_string());
+        let system = self.build_generation_system_prompt(&prompt, &model_label);
+        let extra_args = mtmd_extra_args_for_model(&model_path, architecture.as_deref());
+        let status_model_label = model_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let status_mmproj_label = mmproj_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        std::thread::spawn(move || {
+            let res = run_mtmd_cli_generation(
+                &runtime_dir,
+                &model_path,
+                &mmproj_path,
+                &image_path,
+                &system,
+                &prompt,
+                orch_max_tokens.max(1) as usize,
+                orch_temp,
+                orch_top_p,
+                orch_top_k,
+                &extra_args,
+                &cancel_for_thread,
+            );
+
+            match res {
+                Ok(output) => {
+                    let trimmed = output.trim();
+                    if !trimmed.is_empty() {
+                        let _ = tx.send(GenEvent::Token(trimmed.to_string()));
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(GenEvent::Error(format!("{err:#}")));
+                }
+            }
+            let _ = tx.send(GenEvent::Done);
+        });
+
+        self.runtime_status = format!(
+            "Runtime: multimodal image turn using {} + {}.",
+            status_model_label,
+            status_mmproj_label
+        );
+        self.is_generating = true;
+        self.gen_cancel = Some(cancel);
+        self.gen_rx = Some(rx);
+        self.assistant_draft.clear();
+        self.scroll_to_bottom = true;
+    }
+
+    fn build_generation_system_prompt(&self, prompt: &str, model_label: &str) -> String {
+        let mut base_system = self
+            .messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .map(|m| m.content.clone())
+            .unwrap_or_else(default_orchestrator_system_prompt);
+        if base_system.trim() == "You are ChattyCog. Respond concisely and helpfully." {
+            base_system = default_orchestrator_system_prompt();
+        }
+        if let Some(capsule) = self.active_orchestrator_capsule() {
+            base_system.push_str("\n\n### ACTIVE CAPSULE\n");
+            base_system.push_str(
+                "The user explicitly selected this reusable behavior/personality capsule for the current task. Follow it as a style and persona layer unless the current request clearly needs otherwise.\n",
+            );
+            base_system.push_str(&capsule.text);
+            base_system.push('\n');
+        }
+
+        let mut departments_context =
+            read_departments_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
+        if departments_context.contains("<bullet>") || departments_context.contains("<paragraph>") {
+            departments_context = departments_context
+                .replace("<bullet>", "")
+                .replace("<paragraph>", "");
+        }
+        let lukewarm_context =
+            read_lukewarm_from_logs_dir(self.logs_dir.as_deref()).unwrap_or_default();
+        let mut system = base_system;
+        system.push_str("\n\n### CHATTYCOG COCKPIT ORIENTATION\n");
+        system.push_str(&build_wakeup_orientation(
+            model_label,
+            self.sandbox_dir.is_some(),
+            self.module_registry.modules.len(),
+            self.prefs.allow_sandbox_tool_requests,
+        ));
+        system.push('\n');
+        if !departments_context.trim().is_empty() {
+            system.push_str("\n\n### BACKGROUND MEMORY: DEPARTMENT STATUS\n");
+            system.push_str("These are older module rundowns for continuity. They are not the user's current request. Use them only if the current user message clearly asks for or depends on them.\n");
+            system.push_str(&truncate_for_ui(departments_context.trim(), 2_000));
+            system.push('\n');
+        }
+        if !lukewarm_context.trim().is_empty() {
+            system.push_str("\n### BACKGROUND MEMORY: RECENT ACTIVITY\n");
+            system.push_str("This is a rolling summary, not an instruction. Do not continue old tasks unless the user asks.\n");
+            system.push_str(&truncate_for_ui(lukewarm_context.trim(), 1_200));
+            system.push('\n');
+        }
+        let shared_lukewarm_context = self.build_applied_lukewarm_prompt_block();
+        if !shared_lukewarm_context.trim().is_empty() {
+            system.push_str("\n### BACKGROUND MEMORY: NETWORK-SHARED CONTEXT\n");
+            system.push_str("This context came from another local ChattyCog peer. Treat it as optional background unless the current user message refers to it.\n");
+            system.push_str(&truncate_for_ui(shared_lukewarm_context.trim(), 1_600));
+            system.push('\n');
+        }
+        let recent_chat_context = build_recent_chat_prompt_context(&self.messages, 8, 6_000);
+        if !recent_chat_context.trim().is_empty() {
+            system.push_str("\n### RECENT CHAT CONTEXT\n");
+            system.push_str("Previous turns are context only. The current user message is the immediate task.\n");
+            system.push_str(&recent_chat_context);
+            system.push('\n');
+        }
+        let sandbox_context = build_sandbox_prompt_context(
+            self.sandbox_dir.as_deref(),
+            DEFAULT_SANDBOX_SCRATCHPAD_REL_PATH,
+            DEFAULT_SANDBOX_TASK_LEDGER_REL_PATH,
+        );
+        if !sandbox_context.trim().is_empty() {
+            system.push_str("\n### LOCAL SANDBOX CONTEXT\n");
+            system.push_str("This describes local files available through approved sandbox actions. Do not summarize the sandbox unless it helps answer the current user message.\n");
+            system.push_str(&sandbox_context);
+            system.push('\n');
+        }
+        if !self.sandbox_last_tool_result.trim().is_empty() {
+            system.push_str("\n### LAST SANDBOX TOOL RESULT\n");
+            system.push_str(&truncate_for_ui(
+                self.sandbox_last_tool_result.trim(),
+                5_000,
+            ));
+            system.push('\n');
+        }
+        if let Some(task_ledger_nudge) =
+            build_task_ledger_prompt_nudge(prompt, self.sandbox_dir.as_deref())
+        {
+            system.push_str("\n### TASK LEDGER NUDGE\n");
+            system.push_str(&task_ledger_nudge);
+            system.push('\n');
+        }
+        if self.prefs.allow_sandbox_tool_requests {
+            system.push_str(
+                "\n### SANDBOX TOOL POLICY\n\
+You cannot read or write files directly, but you can request sandbox actions for the user to approve.\n\
+The persistent working scratchpad lives at `scratchpad/current.md` inside `Chatty_Sandbox/`.\n\
+AI sandbox file actions are limited to plain text notes only: `.txt` and `.md` files.\n\
+Only request sandbox actions when they are useful for the user's current request. Do not emit tool JSON during ordinary conversation, greetings, or orientation unless the user asks you to inspect or update files.\n\
+Use the scratchpad to keep durable notes, extracted facts, intermediate plans, and reminders that should survive context-window pressure when the current task benefits from that.\n\
+The structured task ledger lives at `scratchpad/task_ledger.md` and is the best place to keep the current task, next step, open questions, and files touched.\n\
+For longer tasks, update the task ledger whenever the plan meaningfully changes.\n\
+For complex or multi-step tasks, prefer a deterministic preload first so you can inspect the sandbox state before acting.\n\
+When you do need sandbox help, output one or more JSON objects, each on its own line and with no surrounding commentary, using one of:\n\
+  {\"tool\":\"sandbox.write\",\"path\":\"notes/Ready.md\",\"contents\":\"...\"}\n\
+  {\"tool\":\"sandbox.append\",\"path\":\"scratchpad/current.md\",\"contents\":\"\\n- new note\"}\n\
+  {\"tool\":\"sandbox.read\",\"path\":\"notes/Ready.md\"}\n\
+  {\"tool\":\"sandbox.list\"}\n\
+  {\"tool\":\"sandbox.ledger\",\"status\":\"active\",\"current_task\":\"...\",\"next_step\":\"...\",\"open_questions\":[\"...\"],\"files_touched\":[\"notes/brief.md\"],\"notes\":[\"...\"]}\n\
+  {\"tool\":\"sandbox.preload\",\"paths\":[\"notes/brief.md\",\"plans/today.md\"],\"include_list\":true,\"include_scratchpad\":true,\"include_ledger\":true,\"note\":\"load planning context first\"}\n\
+After approval, the sandbox result will be returned to you on the next turn.\n",
+            );
+        } else {
+            system.push_str("\n### SANDBOX TOOL POLICY\nSandbox tool requests are disabled. Do not request file operations.\n");
+        }
+        system
     }
 
     fn stop_generation(&mut self) {
@@ -7502,14 +7612,22 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
         let Some(dir) = self.sandbox_dir.clone() else {
             return;
         };
-        match ensure_path_within_dir(&dir, path)
-            .and_then(|pp| read_text_file(&pp, 500_000).map(|t| (pp, t)))
-        {
-            Ok((pp, text)) => {
+        match ensure_path_within_dir(&dir, path) {
+            Ok(pp) => {
                 self.sandbox_selected = Some(pp.clone());
                 self.sandbox_editor_path = Some(pp.clone());
                 self.sandbox_last_working_path = Some(pp.clone());
-                self.sandbox_editor_text = text;
+                if path_uses_inline_image_preview(&pp) {
+                    self.sandbox_editor_text.clear();
+                } else {
+                    match read_text_file(&pp, 500_000) {
+                        Ok(text) => self.sandbox_editor_text = text,
+                        Err(err) => {
+                            self.sandbox_status = format!("Failed to open file: {err}");
+                            return;
+                        }
+                    }
+                }
                 self.sandbox_status = format!(
                     "Opened {}",
                     pp.file_name().unwrap_or_default().to_string_lossy()
@@ -7551,6 +7669,18 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                     self.runtime_status = format!("Runtime: {}", truncate_for_ui(&s, 240));
                 }
                 GenEvent::Error(e) => {
+                    if let Some(model_path) = self.gguf_path.as_ref() {
+                        let key = model_path.to_string_lossy().to_string();
+                        if e.contains("0xC0000409")
+                            || e.contains("STATUS_STACK_BUFFER_OVERRUN")
+                            || e.contains("current local llama.cpp runtime appears unstable")
+                        {
+                            self.model_runtime_issues.insert(
+                                key,
+                                "Gemma 4 multimodal runtime crash observed on this build.".to_string(),
+                            );
+                        }
+                    }
                     self.messages.push(Message {
                         role: Role::Assistant,
                         content: format!("Error: {e}"),
@@ -8759,20 +8889,25 @@ fn models_tab_legacy(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 ui.label(format!("{} ({})", m.display_name, m.module_id));
 
                 let selected = entry.preferred_model.clone().unwrap_or_default();
-                let selected_label = model_opts
-                    .iter()
-                    .find(|o| o.value == selected)
-                    .map(|o| o.label.clone())
-                    .unwrap_or_else(|| if selected.is_empty() { "(none)".to_string() } else { selected.clone() });
+                let selected_label = selected_model_option_label(
+                    &model_opts,
+                    entry.preferred_model.as_deref(),
+                    if selected.is_empty() {
+                        None
+                    } else {
+                        Some(selected.clone())
+                    },
+                );
 
-                egui::ComboBox::from_id_salt(("preferred_model", m.module_id.as_str()))
-                    .selected_text(selected_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut entry.preferred_model, None, "(none)");
-                        for o in &model_opts {
-                            ui.selectable_value(&mut entry.preferred_model, Some(o.value.clone()), o.label.clone());
-                        }
-                    });
+                if let Some(picked) = show_grouped_model_option_combo(
+                    ui,
+                    ("preferred_model", m.module_id.as_str()),
+                    selected_label,
+                    &model_opts,
+                    entry.preferred_model.as_deref(),
+                ) {
+                    entry.preferred_model = picked;
+                }
 
                 add_presets_prefs_orchestrator(ui, &mut entry.params);
                 ui.add(egui::Slider::new(&mut entry.params.temp, 0.0..=2.0).text("temp"));
@@ -8928,9 +9063,11 @@ fn build_model_options(
     let mut opts = Vec::new();
     for p in scan_ggufs(models_dir) {
         if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+            let (group, badge) = model_option_group_and_badge(&p);
             opts.push(ModelOption {
-                label: format!("models/{}", name),
+                label: format!("models/{}{}", name, badge),
                 value: name,
+                group,
             });
         }
     }
@@ -8940,16 +9077,207 @@ fn build_model_options(
         for p in module_models {
             if let Ok(rel) = p.strip_prefix(mod_root) {
                 let rel = rel.to_string_lossy().replace('\\', "/");
+                let (group, badge) = model_option_group_and_badge(&p);
                 opts.push(ModelOption {
-                    label: format!("modules/{}", rel),
+                    label: format!("modules/{}{}", rel, badge),
                     value: format!("modules/{}", rel),
+                    group,
                 });
             }
         }
     }
 
-    opts.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    opts.sort_by(|a, b| {
+        a.group
+            .rank()
+            .cmp(&b.group.rank())
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
     opts
+}
+
+fn portable_model_hint_for_dirs(
+    models_dir: Option<&Path>,
+    modules_dir: Option<&Path>,
+    path: Option<&Path>,
+) -> Option<String> {
+    let path = path?;
+    if let Some(modules_dir) = modules_dir {
+        if let Ok(rel) = path.strip_prefix(modules_dir) {
+            return Some(format!(
+                "modules/{}",
+                rel.to_string_lossy().replace('\\', "/")
+            ));
+        }
+    }
+    if let Some(models_dir) = models_dir {
+        if let Ok(rel) = path.strip_prefix(models_dir) {
+            return Some(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+fn resolve_portable_model_hint_for_dirs(
+    models_dir: Option<&Path>,
+    modules_dir: Option<&Path>,
+    hint: Option<&str>,
+) -> Option<PathBuf> {
+    let hint = hint?.trim();
+    if hint.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = hint.strip_prefix("modules/") {
+        let path = modules_dir?.join(rest.replace('/', "\\"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    if let Some(models_dir) = models_dir {
+        let direct = models_dir.join(hint.replace('/', "\\"));
+        if direct.is_file() {
+            return Some(direct);
+        }
+        let by_name = models_dir.join(hint);
+        if by_name.is_file() {
+            return Some(by_name);
+        }
+    }
+
+    let file_name = Path::new(hint)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| hint.to_string());
+
+    for candidate in scan_ggufs(models_dir) {
+        if candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().eq_ignore_ascii_case(&file_name))
+            .unwrap_or(false)
+        {
+            return Some(candidate);
+        }
+    }
+    for candidate in scan_ggufs_in_modules(modules_dir) {
+        if candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().eq_ignore_ascii_case(&file_name))
+            .unwrap_or(false)
+        {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn selected_model_option_label(
+    model_opts: &[ModelOption],
+    current_value: Option<&str>,
+    fallback: Option<String>,
+) -> String {
+    current_value
+        .and_then(|value| {
+            model_opts
+                .iter()
+                .find(|option| option.value == value)
+                .map(|option| option.label.clone())
+        })
+        .or(fallback)
+        .unwrap_or_else(|| "(none)".to_string())
+}
+
+fn truncate_model_option_label(label: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = label.chars().collect();
+    if chars.len() <= max_chars {
+        return label.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+
+    let keep_total = max_chars - 3;
+    let front = (keep_total / 2) + (keep_total % 2);
+    let back = keep_total / 2;
+    let head: String = chars.iter().take(front).collect();
+    let tail: String = chars
+        .iter()
+        .skip(chars.len().saturating_sub(back))
+        .collect();
+    format!("{head}...{tail}")
+}
+
+fn show_grouped_model_option_combo(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    selected_text: String,
+    model_opts: &[ModelOption],
+    current_value: Option<&str>,
+) -> Option<Option<String>> {
+    let mut picked: Option<Option<String>> = None;
+    let combo_width = ui.available_width().clamp(220.0, 320.0);
+    let selected_display = truncate_model_option_label(&selected_text, 48);
+    let response = egui::ComboBox::from_id_salt(id)
+        .selected_text(selected_display.clone())
+        .width(combo_width)
+        .show_ui(ui, |ui| {
+            let none_selected = current_value.is_none();
+            if ui.selectable_label(none_selected, "(none)").clicked() {
+                picked = Some(None);
+            }
+            let mut last_group: Option<ModelOptionGroup> = None;
+            for option in model_opts {
+                if last_group
+                    .as_ref()
+                    .map(|group| group.rank())
+                    != Some(option.group.rank())
+                {
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_enabled(
+                        false,
+                        egui::Label::new(
+                            egui::RichText::new(option.group.heading())
+                                .strong()
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        ),
+                    );
+                    last_group = Some(option.group.clone());
+                }
+                let selected = current_value == Some(option.value.as_str());
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    if ui.selectable_label(selected, &option.label).clicked() {
+                        picked = Some(Some(option.value.clone()));
+                    }
+                });
+            }
+        })
+        .response;
+    if selected_display != selected_text {
+        response.on_hover_text(selected_text);
+    }
+    picked
+}
+
+fn model_option_group_and_badge(path: &Path) -> (ModelOptionGroup, String) {
+    let Some(architecture) = read_gguf_architecture(path).ok().flatten() else {
+        return (ModelOptionGroup::Standard, String::new());
+    };
+    if architecture_supports_mtmd(path, Some(&architecture)) {
+        if find_matching_mmproj_path(path, Some(&architecture)).is_some() {
+            return (ModelOptionGroup::VisionReady, " [vision ready]".to_string());
+        }
+        return (
+            ModelOptionGroup::VisionNeedsMmproj,
+            " [needs projector]".to_string(),
+        );
+    }
+    (ModelOptionGroup::Standard, String::new())
 }
 
 fn push_hot_memory(app: &mut ChattyCogApp, item: String) {
@@ -10364,11 +10692,36 @@ fn sandbox_rel_path_is_ai_text_allowed(rel_path: &str) -> bool {
     matches!(ext.to_ascii_lowercase().as_str(), "txt" | "md" | "markdown")
 }
 
+fn sandbox_rel_path_looks_like_image(rel_path: &str) -> bool {
+    let Ok(path) = parse_sandbox_rel_path(rel_path) else {
+        return false;
+    };
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    )
+}
+
+fn sandbox_rel_path_is_ai_read_allowed(rel_path: &str) -> bool {
+    sandbox_rel_path_is_ai_text_allowed(rel_path) || sandbox_rel_path_looks_like_image(rel_path)
+}
+
 fn sandbox_ai_text_guard(rel_path: &str) -> anyhow::Result<()> {
     if sandbox_rel_path_is_ai_text_allowed(rel_path) {
         Ok(())
     } else {
         anyhow::bail!("only .txt and .md sandbox files are allowed for AI tool actions")
+    }
+}
+
+fn sandbox_ai_read_guard(rel_path: &str) -> anyhow::Result<()> {
+    if sandbox_rel_path_is_ai_read_allowed(rel_path) {
+        Ok(())
+    } else {
+        anyhow::bail!("only text and common image sandbox files are allowed for AI read actions")
     }
 }
 
@@ -10386,11 +10739,479 @@ fn normalize_sandbox_task_path_input(input: &str) -> String {
     normalized
 }
 
+fn path_looks_like_image(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    )
+}
+
+fn path_uses_inline_image_preview(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(ext.to_ascii_lowercase().as_str(), "png")
+}
+
+fn format_chat_selected_file_label(path: &Path, sandbox_dir: Option<&Path>) -> String {
+    if let Some(dir) = sandbox_dir
+        && let Ok(rel) = path.strip_prefix(dir)
+    {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn build_chat_selected_file_prompt(
+    path: &Path,
+    sandbox_dir: Option<&Path>,
+) -> anyhow::Result<String> {
+    let label = format_chat_selected_file_label(path, sandbox_dir);
+    if path_looks_like_image(path) {
+        return Ok(format!(
+            "### SELECTED LOCAL FILE\n\
+The user selected the local image file `{label}` for this turn.\n\
+Treat this as the attached multimodal image for the current turn.\n\
+Use the image itself when answering the user's request."
+        ));
+    }
+
+    let text = read_text_file(path, 200_000)?;
+    let trimmed = text.trim();
+    let rendered = if trimmed.is_empty() {
+        "(file is empty)".to_string()
+    } else {
+        truncate_for_ui(trimmed, 24_000)
+    };
+    Ok(format!(
+        "### SELECTED LOCAL FILE\n\
+The user selected the local file `{label}` for this turn.\n\
+Use this file as relevant context for the current request.\n\
+\n\
+File contents:\n\
+{rendered}"
+    ))
+}
+
+fn multimodal_family_hint(model_path: &Path, architecture: Option<&str>) -> Option<&'static str> {
+    let arch = architecture.unwrap_or_default().to_ascii_lowercase();
+    let model_name = model_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if arch == "qwen3vl" || model_name.contains("qwen3-vl") {
+        Some("qwen3")
+    } else if arch == "qwen2vl"
+        || model_name.contains("qwen2.5-vl")
+        || model_name.contains("qwen2-vl")
+    {
+        Some("qwen2")
+    } else if arch == "minicpmv" || model_name.contains("minicpm") {
+        Some("minicpm")
+    } else if arch == "gemma3"
+        || arch == "gemma4"
+        || model_name.contains("gemma-3")
+        || model_name.contains("gemma-4")
+        || model_name.contains("gemma3")
+        || model_name.contains("gemma4")
+    {
+        Some("gemma")
+    } else if arch == "llava" || model_name.contains("llava") || model_name.contains("joycaption") {
+        Some("llava")
+    } else if arch == "smolvlm" || model_name.contains("smolvlm") {
+        Some("smolvlm")
+    } else if arch == "internvl" || model_name.contains("internvl") {
+        Some("internvl")
+    } else {
+        None
+    }
+}
+
+fn architecture_supports_mtmd(model_path: &Path, architecture: Option<&str>) -> bool {
+    multimodal_family_hint(model_path, architecture).is_some()
+}
+
+fn multimodal_family_label(model_path: &Path, architecture: Option<&str>) -> Option<&'static str> {
+    match multimodal_family_hint(model_path, architecture) {
+        Some("qwen3") => Some("Qwen3-VL"),
+        Some("qwen2") => Some("Qwen2-VL"),
+        Some("minicpm") => Some("MiniCPM-V"),
+        Some("gemma") => Some("Gemma vision"),
+        Some("llava") => Some("LLaVA-style"),
+        Some("smolvlm") => Some("SmolVLM"),
+        Some("internvl") => Some("InternVL"),
+        _ => None,
+    }
+}
+
+fn is_projector_candidate(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.contains("mmproj") {
+        return true;
+    }
+    if name == "ggml-model-f16.gguf" || name.starts_with("ggml-model-") {
+        return read_gguf_architecture(path)
+            .ok()
+            .flatten()
+            .map(|arch| arch.eq_ignore_ascii_case("clip"))
+            .unwrap_or(false);
+    }
+    false
+}
+
+fn find_matching_mmproj_path(model_path: &Path, architecture: Option<&str>) -> Option<PathBuf> {
+    let dir = model_path.parent()?;
+    let model_name = model_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let family_hint = multimodal_family_hint(model_path, architecture);
+    let mut best_match: Option<(i32, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+        if !name.ends_with(".gguf") || !is_projector_candidate(&path) {
+            continue;
+        }
+        let mut score = 0;
+
+        if model_name.contains("qwen3") {
+            if name.contains("qwen3") {
+                score += 120;
+            } else {
+                continue;
+            }
+        } else if model_name.contains("qwen2.5") {
+            if name.contains("qwen2.5") {
+                score += 120;
+            } else {
+                continue;
+            }
+        } else if model_name.contains("qwen2") {
+            if name.contains("qwen2") {
+                score += 120;
+            } else {
+                continue;
+            }
+        }
+
+        if model_name.contains("llava-v1.5") {
+            if name.contains("llava-v1.5") {
+                score += 120;
+            } else if name == "mmproj-model-f16.gguf" || name == "ggml-model-f16.gguf" {
+                score += 70;
+            } else {
+                continue;
+            }
+        }
+
+        if let Some(hint) = family_hint {
+            if name.contains(hint) {
+                score += 60;
+            } else if hint == "llava"
+                && (name == "mmproj-model-f16.gguf" || name == "ggml-model-f16.gguf")
+            {
+                score += 40;
+            } else if hint == "gemma" || hint == "qwen2" || hint == "qwen3" {
+                continue;
+            }
+        }
+
+        if name.contains("f16") {
+            score += 5;
+        }
+
+        match &best_match {
+            Some((best_score, _)) if *best_score >= score => {}
+            _ => best_match = Some((score, path)),
+        }
+    }
+    best_match.map(|(_, path)| path)
+}
+
+fn expected_projector_hint(model_path: &Path, architecture: Option<&str>) -> Option<String> {
+    let family = multimodal_family_hint(model_path, architecture)?;
+    let model_name = model_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| model_path.display().to_string());
+
+    Some(match family {
+        "gemma" => {
+            if model_name.to_ascii_lowercase().contains("12b") {
+                "Drop a file like `mmproj-gemma-4-12B-it-Q8_0.gguf` next to this model.".to_string()
+            } else if model_name.to_ascii_lowercase().contains("e4b") {
+                "Drop a file like `mmproj-gemma-4-E4B-it-*.gguf` next to this model.".to_string()
+            } else if model_name.to_ascii_lowercase().contains("31b") {
+                "Drop a file like `mmproj-gemma-4-31B-it-*.gguf` next to this model.".to_string()
+            } else if model_name.to_ascii_lowercase().contains("26b") {
+                "Drop a file like `mmproj-gemma-4-26B-A4B-it-*.gguf` next to this model.".to_string()
+            } else {
+                "Drop a matching `mmproj-gemma-4-*.gguf` file next to this model.".to_string()
+            }
+        }
+        "qwen3" => {
+            "Drop a matching `mmproj-Qwen3-VL-*.gguf` file next to this model.".to_string()
+        }
+        "qwen2" => {
+            "Drop a matching `mmproj-Qwen2.5-VL-*.gguf` or `mmproj-Qwen2-VL-*.gguf` file next to this model.".to_string()
+        }
+        "llava" => {
+            "Drop an llava/joycaption projector next to this model, or use a nearby generic `mmproj-model-f16.gguf` / `ggml-model-f16.gguf` clip projector.".to_string()
+        }
+        "minicpm" => {
+            "Drop a matching `mmproj-MiniCPM-*.gguf` file next to this model.".to_string()
+        }
+        "smolvlm" => {
+            "Drop a matching `mmproj-SmolVLM-*.gguf` file next to this model.".to_string()
+        }
+        "internvl" => {
+            "Drop a matching `mmproj-InternVL-*.gguf` file next to this model.".to_string()
+        }
+        _ => "Drop a matching multimodal projector GGUF next to this model.".to_string(),
+    })
+}
+
+fn selected_model_vision_explanation(path: &Path) -> Option<String> {
+    let architecture = read_gguf_architecture(path).ok().flatten()?;
+    let family = multimodal_family_label(path, Some(&architecture));
+    if !architecture_supports_mtmd(path, Some(&architecture)) {
+        return Some("This GGUF is currently being treated as text-only.".to_string());
+    }
+
+    if let Some(mmproj_path) = find_matching_mmproj_path(path, Some(&architecture)) {
+        let projector_name = mmproj_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        return Some(match family {
+            Some("Gemma vision") => format!(
+                "Gemma vision path detected. Using projector `{projector_name}`. Note: on this current local runtime build, Gemma 4 multimodal launches may still crash even with a matching projector."
+            ),
+            Some(label) => format!("{label} path detected. Using projector `{projector_name}`."),
+            None => format!("Multimodal path detected. Using projector `{projector_name}`."),
+        });
+    }
+
+    Some(match family {
+        Some("Gemma vision") => {
+            format!(
+                "Gemma vision path detected. The model family is multimodal, but this current local runtime path still needs a Gemma-compatible projector file beside the GGUF. {}",
+                expected_projector_hint(path, Some(&architecture)).unwrap_or_default()
+            )
+        }
+        Some("Qwen3-VL") => {
+            format!(
+                "Qwen3-VL path detected, but no Qwen3-compatible projector was found beside the model. {}",
+                expected_projector_hint(path, Some(&architecture)).unwrap_or_default()
+            )
+        }
+        Some("Qwen2-VL") => {
+            format!(
+                "Qwen2-VL path detected, but no Qwen2/Qwen2.5-compatible projector was found beside the model. {}",
+                expected_projector_hint(path, Some(&architecture)).unwrap_or_default()
+            )
+        }
+        Some("LLaVA-style") => {
+            format!(
+                "LLaVA-style path detected, but no matching projector was found. {}",
+                expected_projector_hint(path, Some(&architecture)).unwrap_or_default()
+            )
+        }
+        Some(label) => format!(
+            "{label} path detected, but no compatible projector was found beside the model. {}",
+            expected_projector_hint(path, Some(&architecture)).unwrap_or_default()
+        ),
+        None => format!(
+            "Multimodal path detected, but no compatible projector was found beside the model. {}",
+            expected_projector_hint(path, Some(&architecture)).unwrap_or_default()
+        ),
+    })
+}
+
+fn mtmd_extra_args_for_model(model_path: &Path, architecture: Option<&str>) -> Vec<String> {
+    let model_name = model_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let arch = architecture.unwrap_or_default().to_ascii_lowercase();
+    if arch == "llava" || model_name.contains("llava-v1.5") {
+        return vec!["--chat-template".to_string(), "vicuna".to_string()];
+    }
+    Vec::new()
+}
+
+fn selected_model_inline_status(path: &Path, runtime_issue: Option<&str>) -> Option<String> {
+    let architecture = read_gguf_architecture(path).ok().flatten()?;
+    if !architecture_supports_mtmd(path, Some(&architecture)) {
+        return Some(format!("{architecture} | text-only path"));
+    }
+
+    let mmproj = find_matching_mmproj_path(path, Some(&architecture));
+    let mut parts = vec![architecture.clone()];
+    if let Some(family_label) = multimodal_family_label(path, Some(&architecture)) {
+        parts.push(family_label.to_string());
+    }
+    if runtime_issue.is_some() {
+        parts.push("runtime issue".to_string());
+    }
+    if let Some(mmproj_path) = mmproj.as_ref() {
+        if runtime_issue.is_none() {
+            parts.push("vision ready".to_string());
+        }
+        parts.push(
+            mmproj_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        );
+    } else {
+        parts.push("needs projector".to_string());
+    }
+
+    let extra_args = mtmd_extra_args_for_model(path, Some(&parts[0]));
+    if extra_args.windows(2).any(|pair| pair[0] == "--chat-template") {
+        if let Some(template) = extra_args
+            .windows(2)
+            .find(|pair| pair[0] == "--chat-template")
+            .map(|pair| pair[1].clone())
+        {
+            parts.push(format!("template {template}"));
+        }
+    }
+
+    Some(parts.join(" | "))
+}
+
+fn selected_model_is_vision_ready(path: &Path) -> bool {
+    let Some(architecture) = read_gguf_architecture(path).ok().flatten() else {
+        return false;
+    };
+    architecture_supports_mtmd(path, Some(&architecture))
+        && find_matching_mmproj_path(path, Some(&architecture)).is_some()
+}
+
+fn run_mtmd_cli_generation(
+    runtime_dir: &Path,
+    model_path: &Path,
+    mmproj_path: &Path,
+    image_path: &Path,
+    system_prompt: &str,
+    prompt: &str,
+    max_tokens: usize,
+    temp: f32,
+    top_p: f32,
+    top_k: i32,
+    extra_args: &[String],
+    cancel: &AtomicBool,
+) -> anyhow::Result<String> {
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("generation cancelled");
+    }
+    let exe = runtime_dir.join("llama-mtmd-cli.exe");
+    let output = std::process::Command::new(&exe)
+        .arg("-m")
+        .arg(model_path)
+        .arg("--mmproj")
+        .arg(mmproj_path)
+        .arg("--image")
+        .arg(image_path)
+        .arg("-sys")
+        .arg(system_prompt)
+        .arg("-p")
+        .arg(prompt)
+        .arg("-n")
+        .arg(max_tokens.to_string())
+        .arg("--temp")
+        .arg(format!("{temp:.3}"))
+        .arg("--top-p")
+        .arg(format!("{top_p:.3}"))
+        .arg("--top-k")
+        .arg(top_k.to_string())
+        .arg("--no-warmup")
+        .args(extra_args)
+        .output()
+        .with_context(|| format!("launch {}", exe.display()))?;
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("generation cancelled");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let exit_code = output.status.code();
+        let model_name = model_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if exit_code == Some(-1073740791) {
+            let base = if model_name.contains("gemma-4") || model_name.contains("gemma4") {
+                "mtmd runtime crashed with Windows exit code 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN) while launching Gemma 4 multimodal inference. The model/projector pair is recognized, but this current local llama.cpp runtime appears unstable for Gemma 4 vision on this machine."
+            } else {
+                "mtmd runtime crashed with Windows exit code 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN)."
+            };
+            anyhow::bail!(
+                "{}\n{}\n{}",
+                base,
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+        anyhow::bail!(
+            "mtmd generation failed with status {}.\n{}\n{}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+
+    let combined = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if combined.trim().is_empty() {
+        anyhow::bail!("mtmd generation returned no output");
+    }
+    Ok(combined)
+}
+
 fn build_explicit_sandbox_task_prompt(
     request: &str,
     rel_path: &str,
     intent: SandboxTaskIntent,
 ) -> String {
+    if sandbox_rel_path_looks_like_image(rel_path) {
+        return format!(
+            "SANDBOX TASK MODE is explicitly enabled by the UI for this turn.\n\
+Treat this as a sandbox image inspection request, not ordinary chat.\n\
+Target sandbox path: `{rel_path}`.\n\
+Required behavior:\n\
+- Respond with exactly one `sandbox.read` JSON object for that path and nothing else.\n\
+- Do not request `sandbox.write` or `sandbox.append` for this image path.\n\
+- After the approved read result returns, use the attached image to answer the user's request.\n\
+- Do not add commentary, explanation, markdown fences, or extra text outside the JSON object.\n\
+- Do not emit visible reasoning or planning text.\n\
+\n\
+User request about the image:\n\
+{request}"
+        );
+    }
+
     match intent {
         SandboxTaskIntent::Create => format!(
             "SANDBOX TASK MODE is explicitly enabled by the UI for this turn.\n\

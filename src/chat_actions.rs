@@ -4,6 +4,7 @@ struct OutgoingChatTurn {
     content: String,
     visible_user_message: String,
     generation_prompt: String,
+    selected_file: Option<PathBuf>,
 }
 
 pub(super) fn sync_pending_sandbox_actions(app: &mut ChattyCogApp) {
@@ -36,6 +37,7 @@ pub(super) fn handle_chat_send(ctx: &egui::Context, app: &mut ChattyCogApp) {
     }
 
     app.composer.clear();
+    app.chat_selected_file = None;
     app.pulse_ecg(20.0, "Queued a chat message.");
     app.messages.push(Message {
         role: Role::User,
@@ -63,7 +65,11 @@ pub(super) fn handle_chat_send(ctx: &egui::Context, app: &mut ChattyCogApp) {
         app.broadcast_shared_chat_message("user", "You", &turn.content);
     }
     if app.shared_chat_local_ai_allowed() {
-        app.start_generation(turn.generation_prompt);
+        if let Some(path) = turn.selected_file.as_ref().filter(|path| path_looks_like_image(path)) {
+            app.start_multimodal_generation(turn.generation_prompt, path.clone());
+        } else {
+            app.start_generation(turn.generation_prompt);
+        }
     } else {
         app.runtime_status =
             "Runtime: shared room policy left AI off for this local turn.".to_string();
@@ -82,6 +88,11 @@ fn prepare_outgoing_chat_turn(
 
     let sandbox_path = normalize_sandbox_task_path_input(&app.sandbox_task_path);
     let sandbox_mode_active = app.sandbox_task_enabled;
+    let selected_file = app
+        .chat_selected_file
+        .as_ref()
+        .filter(|path| path.is_file())
+        .cloned();
     let mut generation_prompt = content.clone();
     let visible_user_message = if sandbox_mode_active {
         format!(
@@ -111,11 +122,16 @@ fn prepare_outgoing_chat_turn(
         }
         if sandbox_path.is_empty() {
             app.sandbox_action_status =
-                "Sandbox task mode needs a target `.md` or `.txt` path.".to_string();
+                "Sandbox task mode needs a target sandbox path.".to_string();
             ctx.request_repaint();
             return None;
         }
-        if let Err(err) = sandbox_ai_text_guard(&sandbox_path) {
+        let sandbox_guard = if sandbox_rel_path_looks_like_image(&sandbox_path) {
+            sandbox_ai_read_guard(&sandbox_path)
+        } else {
+            sandbox_ai_text_guard(&sandbox_path)
+        };
+        if let Err(err) = sandbox_guard {
             app.sandbox_action_status = format!("Sandbox task path blocked: {err}");
             ctx.request_repaint();
             return None;
@@ -124,9 +140,27 @@ fn prepare_outgoing_chat_turn(
             build_explicit_sandbox_task_prompt(&content, &sandbox_path, app.sandbox_task_intent);
     }
 
+    if let Some(path) = selected_file.as_ref() {
+        match build_chat_selected_file_prompt(path, app.sandbox_dir.as_deref()) {
+            Ok(file_block) => {
+                generation_prompt = format!("{file_block}\n\n### USER REQUEST\n{generation_prompt}");
+                let file_label = format_chat_selected_file_label(path, app.sandbox_dir.as_deref());
+                app.runtime_status = if path_looks_like_image(path) {
+                    format!("Runtime: attached image {file_label} for a multimodal turn.")
+                } else {
+                    format!("Runtime: included selected file {file_label} in this turn.")
+                };
+            }
+            Err(err) => {
+                app.runtime_status = format!("Runtime: failed to load selected file: {err}");
+            }
+        }
+    }
+
     Some(OutgoingChatTurn {
         content,
         visible_user_message,
         generation_prompt,
+        selected_file,
     })
 }

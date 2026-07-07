@@ -178,30 +178,21 @@ fn render_models_module_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 ui.label(format!("{} ({})", m.display_name, m.module_id));
 
                 let selected = entry.preferred_model.clone().unwrap_or_default();
-                let selected_label = model_opts
-                    .iter()
-                    .find(|o| o.value == selected)
-                    .map(|o| o.label.clone())
-                    .unwrap_or_else(|| {
-                        if selected.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            selected.clone()
-                        }
-                    });
+                let selected_label = selected_model_option_label(
+                    &model_opts,
+                    entry.preferred_model.as_deref(),
+                    if selected.is_empty() { None } else { Some(selected.clone()) },
+                );
 
-                egui::ComboBox::from_id_salt(("preferred_model", m.module_id.as_str()))
-                    .selected_text(selected_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut entry.preferred_model, None, "(none)");
-                        for o in &model_opts {
-                            ui.selectable_value(
-                                &mut entry.preferred_model,
-                                Some(o.value.clone()),
-                                o.label.clone(),
-                            );
-                        }
-                    });
+                if let Some(picked) = show_grouped_model_option_combo(
+                    ui,
+                    ("preferred_model", m.module_id.as_str()),
+                    selected_label,
+                    &model_opts,
+                    entry.preferred_model.as_deref(),
+                ) {
+                    entry.preferred_model = picked;
+                }
 
                 add_presets_prefs_orchestrator(ui, &mut entry.params);
                 ui.add(egui::Slider::new(&mut entry.params.temp, 0.0..=2.0).text("temp"));
