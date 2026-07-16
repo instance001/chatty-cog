@@ -1,4 +1,5 @@
 use super::*;
+use chattycog_gui::capability_orchestrator::HostedModuleCapabilityRecord;
 
 pub(super) fn module_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp, module_id: &str) {
     let mf = app
@@ -157,13 +158,22 @@ fn render_module_host_tab(
 }
 
 pub(super) fn module_allows_network_feature(
-    manifest: Option<&ModuleManifest>,
+    app: &ChattyCogApp,
+    module_id: &str,
     feature: ModuleNetworkFeature,
 ) -> bool {
-    manifest
-        .and_then(|mf| mf.network_capabilities.as_ref())
-        .map(|caps| caps.has(feature))
-        .unwrap_or(true)
+    let module_id = module_id.trim();
+    if module_id.is_empty() {
+        return false;
+    }
+    app.capability_orchestrator()
+        .module_allows_feature(module_id, feature)
+}
+
+fn hosted_module_capabilities(
+    manifest: Option<&ModuleManifest>,
+) -> Option<HostedModuleCapabilityRecord> {
+    manifest.map(HostedModuleCapabilityRecord::from_manifest)
 }
 
 fn render_module_support_panels(
@@ -255,20 +265,18 @@ fn render_module_support_panels(
                 }
             });
 
-        let room_capable = manifest
-            .and_then(|mf| mf.network_capabilities.as_ref())
-            .map(|caps| {
-                caps.has(ModuleNetworkFeature::RoomAware)
-                    || caps.has(ModuleNetworkFeature::Multiplayer)
-            })
+        let hosted_caps = hosted_module_capabilities(manifest);
+        let room_capable = hosted_caps
+            .as_ref()
+            .map(|module| module.room_aware || module.multiplayer)
             .unwrap_or(false);
         if room_capable {
             egui::CollapsingHeader::new("Shared room lane")
                 .default_open(false)
                 .show(ui, |ui| {
-                    let multiplayer = manifest
-                        .and_then(|mf| mf.network_capabilities.as_ref())
-                        .map(|caps| caps.has(ModuleNetworkFeature::Multiplayer))
+                    let multiplayer = hosted_caps
+                        .as_ref()
+                        .map(|module| module.multiplayer)
                         .unwrap_or(false);
                     if app.shared_chat_scope_matches_module(module_id) {
                         ui.small(format!(
@@ -627,11 +635,13 @@ fn render_module_support_panels(
                 ui.label("Shared session state");
                 if let Some(shared_state) = app.read_module_bridge_shared_state(module_id, dir) {
                     let can_publish_shared_state = module_allows_network_feature(
-                        manifest,
+                        app,
+                        module_id,
                         ModuleNetworkFeature::SharedStatePublish,
                     );
                     let can_receive_shared_state = module_allows_network_feature(
-                        manifest,
+                        app,
+                        module_id,
                         ModuleNetworkFeature::SharedStateReceive,
                     );
                     let tracker = app.module_session_trackers.get(module_id).cloned();
@@ -822,9 +832,16 @@ fn render_module_support_panels(
                     }
                 }
 
-                let incoming_asset_lanes = manifest
-                    .and_then(|manifest| manifest.network_capabilities.as_ref())
-                    .map(|caps| caps.asset_lanes.clone())
+                let incoming_asset_lanes = hosted_caps
+                    .as_ref()
+                    .map(|module| {
+                        module
+                            .lanes
+                            .iter()
+                            .filter(|lane| lane.supports_receive)
+                            .filter_map(|lane| lane.asset_lane.clone())
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
                 if !incoming_asset_lanes.is_empty() {
                     ui.add_space(6.0);
@@ -984,7 +1001,7 @@ fn render_module_support_panels(
         if mf.ai_enabled {
             ui.separator();
             ui.heading("Module AI");
-            ui.label("This module can run its own local model while the orchestrator is paused.");
+            ui.label("This module can run its own local model while the orchestrator is paused. Hybrid cloud lanes are currently focused on ChattyCog's core orchestrator and Bookkeeper.");
 
             let models_dir = app.models_dir.clone();
             let modules_dir = app.modules_dir.clone();

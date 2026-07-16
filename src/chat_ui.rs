@@ -33,7 +33,7 @@ pub(super) fn left_sidebar_chat(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     });
 
     ui.add_space(8.0);
-    ui.small("Use the Models tab for GGUF selection, presets, and orchestrator tuning.");
+    ui.small("Use the Models tab for local/cloud model selection, presets, and orchestrator tuning.");
 
     ui.separator();
     ui.add_enabled_ui(app.is_generating, |ui| {
@@ -148,7 +148,7 @@ pub(super) fn render_chat_lukewarm_panel(
         egui::ScrollArea::vertical()
             .id_salt("chat_lukewarm_scroll")
             .max_height(body_height)
-            .auto_shrink([false, false])
+            .auto_shrink([true, false])
             .show(ui, |ui| {
                 egui::Frame::none()
                     .fill(ui.visuals().extreme_bg_color)
@@ -321,8 +321,13 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     if app.models_cache.is_empty() {
         app.models_cache = scan_ggufs(app.models_dir.as_deref());
     }
-    let model_opts = build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
-    let selected_hint = app.portable_model_hint(app.gguf_path.as_deref());
+    let model_opts = build_hybrid_model_options_for_lane(
+        app.models_dir.as_deref(),
+        app.modules_dir.as_deref(),
+        &app.prefs.cloud_models,
+        ModelLane::Orchestrator,
+    );
+    let selected_hint = app.current_orchestrator_selection();
     let selected_label = selected_model_option_label(
         &model_opts,
         selected_hint.as_deref(),
@@ -330,6 +335,16 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             path.file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string())
+        }).or_else(|| {
+            selected_hint.as_ref().and_then(|selection| {
+                if let Some(ResolvedModelTarget::Cloud { target, .. }) =
+                    app.resolve_model_selection(Some(selection), ModelLane::Orchestrator)
+                {
+                    Some(target.display_name)
+                } else {
+                    None
+                }
+            })
         }),
     );
 
@@ -344,8 +359,7 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 &model_opts,
                 selected_hint.as_deref(),
             ) {
-                let path = app.resolve_portable_model_hint(picked.as_deref());
-                app.set_active_chat_model_path(path);
+                app.set_active_chat_model_selection(picked);
             }
         });
         if ui.button("Open GGUF...").clicked() {
@@ -869,46 +883,49 @@ fn render_chat_columns(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         return;
     }
 
-    let preferred_side_width =
+    let left_width =
         ((total_width - min_center_width - (gap * 2.0)) * 0.5).clamp(min_side_width, max_side_width);
-    let center_width =
-        (total_width - (preferred_side_width * 2.0) - (gap * 2.0)).max(min_center_width);
-    let side_width = ((total_width - center_width - (gap * 2.0)) * 0.5)
+    let max_right_width = (total_width - left_width - min_center_width - (gap * 2.0))
         .clamp(min_side_width, max_side_width);
+    let desired_right_width = app
+        .prefs
+        .chat_right_panel_width
+        .clamp(min_side_width, max_right_width);
+    if (app.prefs.chat_right_panel_width - desired_right_width).abs() > f32::EPSILON {
+        app.prefs.chat_right_panel_width = desired_right_width;
+    }
+    let previous_spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing.x = gap;
 
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(side_width, panel_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(side_width);
-                ui.set_max_width(side_width);
-                render_chat_hot_memory_panel(ui, app, panel_height);
-            },
-        );
-        ui.add_space(gap);
+    egui::SidePanel::right("chat_lukewarm_panel")
+        .resizable(true)
+        .default_width(desired_right_width)
+        .min_width(min_side_width)
+        .max_width(max_right_width)
+        .show_inside(ui, |ui| {
+            let measured_width = ui.max_rect().width().clamp(min_side_width, max_right_width);
+            if (app.prefs.chat_right_panel_width - measured_width).abs() > 0.5 {
+                app.prefs.chat_right_panel_width = measured_width;
+                app.persist_chat_layout_prefs();
+            }
+            ui.set_min_height(panel_height);
+            render_chat_lukewarm_panel(ui, app, panel_height);
+        });
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(center_width, panel_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(center_width);
-                ui.set_max_width(center_width);
-                render_chat_transcript(ui, app, panel_height);
-            },
-        );
-        ui.add_space(gap);
+    egui::SidePanel::left("chat_hot_memory_panel")
+        .resizable(false)
+        .exact_width(left_width)
+        .show_inside(ui, |ui| {
+            ui.set_min_height(panel_height);
+            render_chat_hot_memory_panel(ui, app, panel_height);
+        });
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(side_width, panel_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(side_width);
-                ui.set_max_width(side_width);
-                render_chat_lukewarm_panel(ui, app, panel_height);
-            },
-        );
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        ui.set_min_height(panel_height);
+        render_chat_transcript(ui, app, panel_height);
     });
+
+    ui.spacing_mut().item_spacing = previous_spacing;
 }
 
 fn render_chat_columns_stacked(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_height: f32, gap: f32) {
@@ -968,12 +985,16 @@ fn render_chat_transcript(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_heigh
             egui::ScrollArea::vertical()
                 .id_salt("chat_scroll")
                 .stick_to_bottom(app.scroll_to_bottom)
-                .auto_shrink([false, false])
+                .hscroll(false)
+                .max_width(transcript_width)
+                .min_scrolled_width(0.0)
+                .auto_shrink([false, true])
                 .max_height(panel_height - 24.0)
                 .show(ui, |ui| {
                     let scroll_width = ui.available_width();
                     ui.set_width(scroll_width);
                     ui.set_max_width(scroll_width);
+                    ui.set_min_width(scroll_width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     for msg in &app.messages {
                         message_bubble(ui, msg);
@@ -1018,6 +1039,7 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_width(width);
+            ui.set_min_width(width);
             ui.set_max_width(width);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             egui::Frame::none()
@@ -1026,13 +1048,27 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
-                    ui.set_max_width(width);
+                    let bubble_width = ui.available_width().max(0.0);
+                    ui.set_width(bubble_width);
+                    ui.set_min_width(bubble_width);
+                    ui.set_max_width(bubble_width);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     ui.horizontal(|ui| {
                         ui.colored_label(color, label);
                     });
-                    ui.add(
-                        egui::Label::new(msg.content.clone())
-                            .wrap_mode(egui::TextWrapMode::Wrap),
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(bubble_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(bubble_width);
+                            ui.set_min_width(bubble_width);
+                            ui.set_max_width(bubble_width);
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.add(
+                                egui::Label::new(msg.content.as_str())
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        },
                     );
                     if matches!(msg.role, Role::Assistant) {
                         if let Some(thinking) = msg
@@ -1069,7 +1105,7 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
                                 .rounding(egui::Rounding::same(6.0))
                                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         let chevron = if is_open { "v" } else { ">" };
                                         let response = ui.add(
                                             egui::Button::new(format!("{chevron} {label}"))
@@ -1096,16 +1132,33 @@ pub(super) fn message_bubble(ui: &mut egui::Ui, msg: &Message) {
                                 ui.add_space(4.0);
                                 egui::ScrollArea::vertical()
                                     .id_salt(("assistant_thinking", msg.content.as_str()))
+                                    .hscroll(false)
+                                    .max_width(bubble_width)
+                                    .min_scrolled_width(0.0)
+                                    .auto_shrink([false, true])
                                     .max_height(220.0)
                                     .show(ui, |ui| {
-                                        ui.set_width(ui.available_width());
-                                        ui.set_max_width(ui.available_width());
+                                        let thinking_width = ui.available_width().max(0.0);
+                                        ui.set_width(thinking_width);
+                                        ui.set_min_width(thinking_width);
+                                        ui.set_max_width(thinking_width);
                                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(thinking).monospace(),
-                                            )
-                                            .wrap_mode(egui::TextWrapMode::Wrap),
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(thinking_width, 0.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.set_width(thinking_width);
+                                                ui.set_min_width(thinking_width);
+                                                ui.set_max_width(thinking_width);
+                                                ui.style_mut().wrap_mode =
+                                                    Some(egui::TextWrapMode::Wrap);
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(thinking).monospace(),
+                                                    )
+                                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                                );
+                                            },
                                         );
                                     });
                             }

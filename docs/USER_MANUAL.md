@@ -4,21 +4,36 @@ This guide assumes you are starting from scratch and have never used Rust, GGUF 
 
 ## What is chatty-cog?
 
-chatty-cog is a Windows desktop app that lets you chat with local AI models stored as `.gguf` files.
+chatty-cog is a Windows desktop app for local-first, cloud-optional AI work.
 
-- It runs offline (no call-home / no cloud API required).
-- It uses a local runtime based on llama.cpp.
-- It includes a CPU-only Bookkeeper that stores logs and helps you search them later.
+The short version:
+
+- local when you do not want cloud dependency
+- cloud when you need a stronger or more suitable model
+- hybrid when the current task deserves the right model instead of a purity test
+
+chatty-cog lets you keep local GGUF workflows as the base case while also adding your own optional cloud model entries inside the app.
+
+- It runs offline just fine (no call-home / no cloud API required).
+- It uses a local runtime based on llama.cpp for GGUF models.
+- It can also list optional BYO cloud models beside local ones in the same selectors.
+- It includes a Bookkeeper that stores logs and helps you search them later.
 - It supports modules ("departments") via a simple drop-in folder system.
 - It can optionally connect to other nearby chatty-cog instances over local Wi-Fi or LAN.
 - That optional peer networking is only for chatty-cog-to-chatty-cog connections, not chatty-edu.
+
+The intended stance is user sovereignty:
+
+- local-first by default
+- cloud by explicit user choice
+- the right model for the task at hand, not forced lock-in
 
 ## Key terms
 
 - **GGUF**: a file format for LLM weights (the model file you download).
 - **Runtime**: the local engine that can run GGUF models (`llama.dll` and `ggml-*.dll`).
 - **Orchestrator**: the main Chat tab (the "pilot").
-- **Bookkeeper**: the CPU-only memory/logging helper (Logs tab).
+- **Bookkeeper**: the memory/logging helper (Logs tab). It can now run on a local or cloud lane depending on what you select.
 - **Hot / Luke Warm / Cold memory**:
   - Hot: small, recent/pinned sidebar items in Chat
   - Luke Warm: a rolling summary of recent activity (`lukewarm.txt`)
@@ -35,7 +50,7 @@ chatty-cog is a Windows desktop app that lets you chat with local AI models stor
 
 ## Folder layout (important)
 
-Inside `chattycog_gui/`:
+Inside the repo root:
 
 - `models/`
   - Put your `.gguf` model files here.
@@ -58,8 +73,8 @@ Inside `chattycog_gui/`:
 Open a terminal in the repo and run:
 
 ```bash
-cargo build --manifest-path chattycog_gui/Cargo.toml
-cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
+cargo build --bin chattycog_gui
+cargo run --bin chattycog_gui
 ```
 
 ## Using the app
@@ -68,11 +83,16 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 
 1) Select a model
 - Use the Chat header `Model` dropdown, `Open GGUF...`, or `Refresh models`.
-- The active model path also appears in the app header as `GGUF: ...`.
+- The dropdown can now include both:
+  - local GGUF models
+  - BYO cloud models you added in the `Models` tab
+- Local GGUFs are still the easiest zero-account path.
+- Cloud entries are optional and user-supplied.
 
 2) Confirm runtime is loaded
 - The top of the chat shows a "Runtime:" status line.
 - ChattyCog may show a GPU/Vulkan path even when a small number of tensors still stay on CPU. That is still a real GPU-assisted run, not a full CPU fallback.
+- If you selected a cloud model, the runtime line will say so explicitly.
 - The Chat header also shows the live `Chat max tokens` value for the next orchestrator reply.
 
 3) Type a message
@@ -84,14 +104,66 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
 - If the assistant includes a reasoning trace, use the `Show thinking` / `Hide thinking` disclosure row inside the assistant bubble to expand or collapse it without losing the visible answer.
 
 4) Adjust generation
-- Open the `Preferences` tab and use `Orchestrator (Chat)`:
+- Open the `Models` tab and use `Orchestrator (Chat)`:
   - Presets: Precise / Balanced / Creative
   - Sliders: temperature, top_p, top_k, max_tokens
+- The same Models tab also lets you choose which model the orchestrator should use.
 - These orchestrator sliders now apply to live chat immediately, so the next reply uses the new values without a separate hidden apply step.
 - `Save` writes the current defaults into `config/preferences.json`.
 
-5) Optional voice / personality capsules
-- Open the `Preferences` tab and use the `Capsule Library` on the right.
+5) Optional cloud model setup
+- Open the `Models` tab.
+- Find the `Cloud Models` section.
+- Choose a provider family first.
+- Add:
+  - a display name
+  - a base URL
+  - a chat model name
+  - an API key
+  - optionally an embeddings model name
+- Example provider-default-style setup values:
+  - OpenAI:
+    - base URL: `https://api.openai.com/v1`
+    - chat model: `gpt-4.1-mini`
+    - embeddings model: `text-embedding-3-small`
+  - Anthropic:
+    - base URL: `https://api.anthropic.com/v1`
+    - chat model: `claude-sonnet-5`
+    - embeddings model: leave blank for now, because the current ChattyCog Anthropic lane does not expose Bookkeeper embeddings yet
+  - Gemini:
+    - base URL: `https://generativelanguage.googleapis.com/v1beta/openai`
+    - chat model: `gemini-3.5-flash`
+    - embeddings model: `gemini-embedding-2-preview`
+  - OpenAI-compatible:
+    - use your provider's own base URL plus the exact model names that host exposes
+- `Test connection` runs a live chat check against the current entry and, when supported and configured, also tests embeddings.
+- Saved cloud entries also remember their last health result and when they were last checked, so the list can show whether a profile was verified recently.
+- Older successful checks automatically soften into a stale state after about a week, so a green result does not look evergreen forever.
+- `Retest stale` runs through stale saved entries one at a time, which is handy when you want to refresh aging profiles without manually clicking each one.
+- `Retest failed` does the same for saved entries that last failed a health check, which is useful after fixing a key, quota, model name, or base URL.
+- `Unhealthy only` filters the saved list down to stale and failed entries when you just want to focus on cloud profiles that need attention.
+- Even in the normal `All` view, failed and stale cloud entries float to the top so the profiles that need attention are easiest to spot.
+- Failure reason chips like `auth`, `model`, or `endpoint` are clickable. Clicking one loads that saved entry back into the editor and moves focus to the field most likely to need fixing.
+- After that jump, the editor now also shows a short repair hint under the provider examples so the likely next fix is spelled out in-place.
+- When ChattyCog knows a safe autofill, that repair hint area can also show a one-click action such as restoring the provider default base URL.
+- The provider example lines can also expose one-click exact-value helpers for known-safe strings like the recommended chat or embeddings model names.
+- After a saved cloud entry passes a health check, ChattyCog also remembers the exact chat and embeddings model strings that worked, and can offer those back as `last verified` reuse helpers later.
+- Those remembered verified values now also say whether the last successful check proved chat only or both chat and embeddings.
+- That same verification scope now also appears directly in each saved cloud entry row, so you can scan Bookkeeper-ready versus chat-only profiles without reopening the editor.
+- Saved rows now also include a compact readiness badge like `bookkeeper-ready` or `chat-only` for even faster scanning.
+- The saved cloud list now also includes a small legend for badges like `untested`, `testing`, `ok`, `stale`, `fail`, `bookkeeper-ready`, and `chat-only`.
+- The heavier cloud-health controls now live inside an `Advanced status / maintenance` disclosure so the everyday add/edit flow stays compact.
+- ChattyCog now remembers whether you left that `Advanced status / maintenance` disclosure open or closed, so it comes back the way you prefer next session.
+- ChattyCog also remembers whether the saved cloud list filter was left on `All` or `Unhealthy only`.
+- That advanced area now also shows when the last stale or failed maintenance sweep ran.
+- That same advanced area now also offers `Retest all unhealthy` when you want one combined pass across both stale and failed entries.
+- It now also tracks the last `all unhealthy` sweep separately, so broad cleanup passes are distinguishable from narrower maintenance runs.
+- After saving, that cloud model appears in the same model pickers as your local GGUFs.
+- If you want to use a cloud model for the Bookkeeper too, give it an embeddings model name so semantic search can still work.
+- `Use provider default` will refill the base URL field for the currently selected provider family.
+
+6) Optional voice / personality capsules
+- Open the `Models` tab and use the `Capsule Library` on the right.
 - You can:
   - save a named personality / behavior capsule
   - activate it for the current chat style
@@ -100,13 +172,13 @@ cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
   - `Voice: native ChattyCog`
   - or the active capsule name plus a short preview
 
-6) Sandbox tool requests (optional)
+7) Sandbox tool requests (optional)
 - The orchestrator cannot directly read/write your files.
 - If it needs to read/write within `Chatty_Sandbox/`, it can request sandbox actions like `write`, `append`, `read`, `list`, `preload`, or `ledger`.
 - Chatty-cog sandbox is limited to .txt and .md files.
 - The Chat UI will show a "Pending sandbox actions" panel with `Seed ledger from current prompt`, `Defer actions`, `Preload + Continue`, `Approve`, `Approve + Continue`, and `Reject`.
 - Only approved actions execute, and they are restricted to `Chatty_Sandbox/`.
-- This feature can be enabled/disabled in the Preferences tab.
+- This feature can be enabled/disabled in the Models tab.
 - ChattyCog now keeps a persistent scratchpad at `Chatty_Sandbox/scratchpad/current.md`.
 - ChattyCog also keeps a structured task ledger at `Chatty_Sandbox/scratchpad/task_ledger.md`.
 - The Chat prompt can see:
@@ -173,10 +245,10 @@ To start from a shipped builder template:
 - if you are publishing an update, use `docs/MODULE_RELEASE_NOTES_TEMPLATE.md`
 - if the module will keep evolving, start a `CHANGELOG.md` from `docs/CHANGELOG_TEMPLATE.md`
 - if you are handing it to another person or team, use `docs/MODULE_SUBMISSION_TEMPLATE.md`
-- copy `chattycog_gui/module_templates/template_module/`
-- or copy `chattycog_gui/module_templates/template_native_rust_module/`
-- or copy `chattycog_gui/module_templates/template_python_module/`
-- paste it into `chattycog_gui/modules/`
+- copy `module_templates/template_module/`
+- or copy `module_templates/template_native_rust_module/`
+- or copy `module_templates/template_python_module/`
+- paste it into `modules/`
 - rename the copied folder
 - update the copied module files
 - use **Modules -> Rescan modules**
@@ -224,16 +296,16 @@ Tip:
 
 #### "What happened in this module" automation (recommended)
 
-If **Preferences -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled:
+If **Models -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled:
 - When you leave a module tab, ChattyCog first checks whether the module reported its own bridge status.
 - If the module wrote `bridge/status.json`, ChattyCog uses that handoff first.
-- If only a richer bridge snapshot exists, the CPU-only Bookkeeper summarizes it.
+- If only a richer bridge snapshot exists, the Bookkeeper summarizes it through its current local or cloud lane.
 - If the module declared `bridge/log_sources.json`, ChattyCog also reads the recent tail of those module-local logs and uses that as extra context.
 - If no bridge status exists, ChattyCog falls back to its own form/workspace snapshot (plus last module AI output if any).
-- The CPU-only Bookkeeper generates a short "suspend rundown" automatically.
+- The Bookkeeper generates a short "suspend rundown" automatically.
 - The latest per-module rundowns are written to:
-  - `chattycog_gui/memory/departments.md`
-  - `chattycog_gui/memory/departments.json`
+  - `memory/departments.md`
+  - `memory/departments.json`
 - The Chat tab injects `departments.md` into the orchestrator system prompt as "Department Status Updates".
 
 Note: this is asynchronous, so it can take a few seconds. If you switch back to Chat and ask a cross-module question immediately, wait a moment and try again.
@@ -280,9 +352,9 @@ Why this is useful:
 - the module bridge gives the next step something better than "start from nothing"
 - ChattyCog becomes the connective tissue between specialized tools, not just another chat window
 
-### Preferences tab (formerly Models)
+### Models tab
 
-The Preferences tab stores and applies defaults across ChattyCog and modules.
+The Models tab stores and applies defaults across ChattyCog and modules.
 
 - Preferences file: `config/preferences.json`
 - Orchestrator defaults: temperature/top_p/top_k/max_tokens
@@ -448,8 +520,8 @@ Note:
 ### "Runtime locate error" / "Runtime load error"
 
 Check:
-- `chattycog_gui/runtime/windows/llama.dll` exists
-- `chattycog_gui/runtime/windows/ggml.dll` exists
+- `runtime/windows/llama.dll` exists
+- `runtime/windows/ggml.dll` exists
 - you kept the runtime DLLs together in the same folder
 
 ### Vulkan / GPU runs out of memory (OOM)
@@ -473,7 +545,7 @@ Tips:
 ### Sandbox tool requests don't create files
 
 Checklist:
-- Confirm **Preferences -> Allow sandbox tool requests** is enabled.
+- Confirm **Models -> Allow sandbox tool requests** is enabled.
 - Ask in plain language, but explicitly require the tool format:
   - "Output only the `sandbox.write` JSON object."
 - Approve the pending action in the Chat tab (nothing runs until you click Approve).
@@ -486,14 +558,14 @@ Safety note:
 
 Checklist:
 - Look at the Chat header and confirm `Chat max tokens` is not still low.
-- Open `Preferences -> Orchestrator (Chat)` and confirm `max_tokens` is where you expect it.
+- Open `Models -> Orchestrator (Chat)` and confirm `max_tokens` is where you expect it.
 - Save preferences if you want the higher value to persist into the next launch.
 - If the reply is extremely repetitive, interrupt it and retry after simplifying the active capsule or prompt.
 
 ### Module debriefs are not appearing in Chat
 
 Checklist:
-- Confirm **Preferences -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled.
+- Confirm **Models -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled.
 - Confirm the Bookkeeper is running (Logs tab) and has a model selected.
 - Leave the module tab (switch back to Chat) and wait a few seconds.
 
@@ -530,7 +602,7 @@ Common causes include:
 You can also run with a backtrace:
 ```bash
 set RUST_BACKTRACE=1
-cargo run --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
+cargo run --bin chattycog_gui
 ```
 
 ## Privacy / offline behavior

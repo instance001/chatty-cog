@@ -9,7 +9,7 @@ ChattyCog can render a structured module surface from a file named `ui.json` ins
 1) Create a normal module (at minimum you need `manifest.json`)
 
 ```
-chattycog_gui/
+chatty-cog/
   modules/
     your_module/
       manifest.json
@@ -20,7 +20,7 @@ chattycog_gui/
 - `docs/MODULE_UI_TEMPLATE.json`
 
 into:
-- `chattycog_gui/modules/your_module/ui.json`
+- `modules/your_module/ui.json`
 
 3) Open the module in ChattyCog
 - Use **Modules -> Open: <display_name>**
@@ -29,7 +29,7 @@ into:
 4) Save
 - Click **Save** in the module tab.
 - ChattyCog writes the user-entered values to:
-  - `chattycog_gui/modules/your_module/state.json`
+  - `modules/your_module/state.json`
 
 ## What this is (and isn't)
 
@@ -349,10 +349,10 @@ To make a module tab feel purpose-built:
 ## How this connects to memory / orchestration
 
 - When the user leaves a module tab (or closes it), ChattyCog emits a "suspend rundown" event to the Bookkeeper (cold log).
-- If **Preferences -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled, the Bookkeeper auto-generates this rundown from a snapshot of:
+- If **Models -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled, the Bookkeeper auto-generates this rundown from a snapshot of:
   - the module form (`state.json`) or workspace (`workspace.md`)
   - last module AI output (if any)
 - The latest per-module debriefs are written to:
-  - `chattycog_gui/memory/departments.md`
-  - `chattycog_gui/memory/departments.json`
+  - `memory/departments.md`
+  - `memory/departments.json`
 - The orchestrator reads `departments.md` before each Chat response, so it stays cross-module aware.

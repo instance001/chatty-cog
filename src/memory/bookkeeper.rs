@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::cloud_ai::{CloudProviderAdapter, ResolvedCloudTarget, build_adapter};
 use crate::llama_dyn::Llama;
 
 #[derive(Debug, Clone)]
@@ -95,7 +96,7 @@ impl Clone for BookkeeperHandle {
 }
 
 impl BookkeeperHandle {
-    pub fn start(
+    pub fn start_local(
         runtime_dir: PathBuf,
         model_path: PathBuf,
         data_dir: PathBuf,
@@ -106,7 +107,27 @@ impl BookkeeperHandle {
 
         let (tx, rx) = crossbeam_channel::unbounded::<BookkeeperCmd>();
         std::thread::spawn(move || {
-            if let Err(e) = run_bookkeeper(&runtime_dir, &model_path, &data_dir, config, rx) {
+            if let Err(e) =
+                run_local_bookkeeper(&runtime_dir, &model_path, &data_dir, config, rx)
+            {
+                eprintln!("bookkeeper error: {e:#}");
+            }
+        });
+
+        Ok(Self { tx })
+    }
+
+    pub fn start_cloud(
+        target: ResolvedCloudTarget,
+        data_dir: PathBuf,
+        config: BookkeeperConfig,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(&data_dir)
+            .with_context(|| format!("create {}", data_dir.display()))?;
+
+        let (tx, rx) = crossbeam_channel::unbounded::<BookkeeperCmd>();
+        std::thread::spawn(move || {
+            if let Err(e) = run_cloud_bookkeeper(target, &data_dir, config, rx) {
                 eprintln!("bookkeeper error: {e:#}");
             }
         });
@@ -197,7 +218,7 @@ struct Entry {
     emb: Vec<f32>,
 }
 
-fn run_bookkeeper(
+fn run_local_bookkeeper(
     runtime_dir: &Path,
     model_path: &Path,
     data_dir: &Path,
@@ -287,6 +308,89 @@ fn run_bookkeeper(
     Ok(())
 }
 
+fn run_cloud_bookkeeper(
+    target: ResolvedCloudTarget,
+    data_dir: &Path,
+    config: BookkeeperConfig,
+    rx: Receiver<BookkeeperCmd>,
+) -> Result<()> {
+    let client = build_adapter(target)?;
+
+    let mut store = Store::load(data_dir)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut lukewarm = LukeWarm::new(config, data_dir);
+    let mut dept_status =
+        DepartmentStatus::load(data_dir).unwrap_or_else(|_| DepartmentStatus::new(data_dir));
+    if lukewarm.summary.is_empty() {
+        if let Ok(s) = std::fs::read_to_string(&lukewarm.summary_path) {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                lukewarm.summary = s;
+            }
+        }
+    }
+
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            BookkeeperCmd::Append(ev) => {
+                let mut text_for_emb = String::new();
+                text_for_emb.push_str(ev.text.trim());
+                if !ev.tags.is_empty() {
+                    text_for_emb.push_str("\nTags: ");
+                    text_for_emb.push_str(&ev.tags.join(", "));
+                }
+                if let Some(p) = &ev.payload_json {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        text_for_emb.push_str("\nPayload: ");
+                        text_for_emb.push_str(&clamp_chars_ellipsis(p, 800));
+                    }
+                }
+                text_for_emb.push_str("\n[");
+                text_for_emb.push_str(&ev.module.clone().unwrap_or_default());
+                text_for_emb.push(':');
+                text_for_emb.push_str(&ev.event_type.clone().unwrap_or_default());
+                text_for_emb.push(']');
+
+                let text_for_emb = clamp_chars_ellipsis(&text_for_emb, 2400);
+                let emb = client.embed_text(&text_for_emb).unwrap_or_default();
+                store.append(&ev, emb)?;
+                lukewarm.push_event_cloud(&*client, &cancel, &ev);
+                dept_status.update_from_event(&ev);
+            }
+            BookkeeperCmd::SummarizeModuleRundown {
+                module_id,
+                input,
+                reply,
+            } => {
+                let summary = summarize_module_rundown_cloud(&*client, &module_id, &input);
+                let _ = reply.send(summary);
+            }
+            BookkeeperCmd::Search {
+                query,
+                module,
+                tag,
+                k,
+                reply,
+            } => {
+                let qemb = client.embed_text(&query).unwrap_or_default();
+                let hits = store.search(&query, module.as_deref(), tag.as_deref(), &qemb, k);
+                let _ = reply.send(hits);
+            }
+            BookkeeperCmd::GetLukeWarm { reply } => {
+                lukewarm.tick_cloud(&*client, &cancel);
+                let _ = reply.send(lukewarm.summary.clone());
+            }
+            BookkeeperCmd::Shutdown => {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn summarize_module_rundown(
     llama: &Llama,
     model_path: &Path,
@@ -319,6 +423,36 @@ fn summarize_module_rundown(
         out.push_str(t)
     });
     sanitize_rundown_output(module_id, &out)
+}
+
+fn summarize_module_rundown_cloud(
+    client: &dyn CloudProviderAdapter,
+    module_id: &str,
+    input: &str,
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("Task: Write a short suspend rundown for the module below.\n");
+    prompt.push_str("Output rules:\n");
+    prompt.push_str("- Output EXACTLY two lines.\n");
+    prompt.push_str("- Line 1: starts with '- ' and is one sentence.\n");
+    prompt.push_str("- Line 2: one short paragraph.\n");
+    prompt.push_str("- Max ~80 words total.\n");
+    prompt.push_str(
+        "- Include: current status, what changed, next action, and any key artifact paths.\n",
+    );
+    prompt.push_str("- Be factual. If missing info, say what's missing.\n");
+    prompt.push_str("- No headings.\n\n");
+    prompt.push_str("Module: ");
+    prompt.push_str(module_id);
+    prompt.push_str("\n\nContext:\n");
+    prompt.push_str(input);
+
+    let system =
+        "You are the Bookkeeper for a modular research lab UI. Keep outputs compact and factual.";
+    match client.chat_completion(system, &prompt, 140, 0.2, 0.9) {
+        Ok(out) => sanitize_rundown_output(module_id, &out),
+        Err(_) => String::new(),
+    }
 }
 
 fn clamp_chars_ellipsis(s: &str, max_chars: usize) -> String {
@@ -664,8 +798,38 @@ impl LukeWarm {
         self.maybe_summarize(llama, model_path, cancel, false);
     }
 
+    fn push_event_cloud(
+        &mut self,
+        client: &dyn CloudProviderAdapter,
+        cancel: &AtomicBool,
+        ev: &MemoryEvent,
+    ) {
+        let line = format!(
+            "[{}] ({}/{}) {}",
+            ev.source,
+            ev.module.clone().unwrap_or_else(|| "-".to_string()),
+            ev.event_type.clone().unwrap_or_else(|| "-".to_string()),
+            ev.text
+        );
+        self.token_est += (line.len().max(1) + 3) / 4;
+        self.buf.push(line);
+
+        while self.token_est > self.cfg.lukewarm_token_window && !self.buf.is_empty() {
+            let removed = self.buf.remove(0);
+            self.token_est = self
+                .token_est
+                .saturating_sub((removed.len().max(1) + 3) / 4);
+        }
+
+        self.maybe_summarize_cloud(client, cancel, false);
+    }
+
     fn tick(&mut self, llama: &Llama, model_path: &Path, cancel: &AtomicBool) {
         self.maybe_summarize(llama, model_path, cancel, true);
+    }
+
+    fn tick_cloud(&mut self, client: &dyn CloudProviderAdapter, cancel: &AtomicBool) {
+        self.maybe_summarize_cloud(client, cancel, true);
     }
 
     fn maybe_summarize(
@@ -722,6 +886,62 @@ impl LukeWarm {
             self.summary = out;
             self.last_summary_at = Some(now);
             let _ = std::fs::write(&self.summary_path, &self.summary);
+        }
+    }
+
+    fn maybe_summarize_cloud(
+        &mut self,
+        client: &dyn CloudProviderAdapter,
+        cancel: &AtomicBool,
+        force_by_time: bool,
+    ) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due_by_time = self
+            .last_summary_at
+            .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(30))
+            .unwrap_or(true);
+
+        let due_by_size = self.token_est >= self.cfg.lukewarm_token_window.saturating_sub(200);
+        if !(due_by_size || (force_by_time && due_by_time)) {
+            return;
+        }
+
+        let mut prompt = String::new();
+        if !self.summary.trim().is_empty() {
+            prompt.push_str("Existing rolling summary:\n");
+            prompt.push_str(self.summary.trim());
+            prompt.push_str(
+                "\n\nUpdate that summary using the recent activity below. Preserve still-relevant context, drop stale detail, and keep the result compact.\n\n",
+            );
+        }
+        prompt.push_str("Summarize the recent activity below into ONE bullet point and ONE short paragraph (max ~80 words). ");
+        prompt
+            .push_str("Focus on what happened, key decisions, and what is currently in progress. ");
+        prompt.push_str("Do not include more than one bullet.\n\nActivity:\n");
+        for l in &self.buf {
+            prompt.push_str("- ");
+            prompt.push_str(l);
+            prompt.push('\n');
+        }
+
+        let system =
+            "You are the Bookkeeper for a modular research lab UI. Keep summaries compact and factual.";
+        if let Ok(out) = client.chat_completion(
+            system,
+            &prompt,
+            self.cfg.lukewarm_max_tokens,
+            0.2,
+            0.9,
+        ) {
+            let out = sanitize_lukewarm_output(out.trim());
+            if !out.is_empty() {
+                self.summary = out;
+                self.last_summary_at = Some(now);
+                let _ = std::fs::write(&self.summary_path, &self.summary);
+            }
         }
     }
 }

@@ -33,7 +33,7 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     }
 
     ui.separator();
-    ui.heading("Bookkeeper (CPU)");
+    ui.heading("Bookkeeper");
     ui.label("Model");
 
     if ui.button("Refresh models").clicked() {
@@ -42,8 +42,13 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     if app.models_cache.is_empty() {
         app.models_cache = scan_ggufs(app.models_dir.as_deref());
     }
-    let model_opts = build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
-    let selected_hint = app.portable_model_hint(app.bookkeeper_model_path.as_deref());
+    let model_opts = build_hybrid_model_options_for_lane(
+        app.models_dir.as_deref(),
+        app.modules_dir.as_deref(),
+        &app.prefs.cloud_models,
+        ModelLane::Bookkeeper,
+    );
+    let selected_hint = app.current_bookkeeper_selection();
     let selected_label = selected_model_option_label(
         &model_opts,
         selected_hint.as_deref(),
@@ -61,8 +66,7 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         &model_opts,
         selected_hint.as_deref(),
     ) {
-        app.bookkeeper_model_path = app.resolve_portable_model_hint(picked.as_deref());
-        app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
+        app.set_bookkeeper_model_selection(picked);
     }
 
     if ui.button("Pick model...").clicked() {
@@ -70,11 +74,13 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         if let Some(dir) = &app.models_dir {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(path) = dialog.pick_file() {
-            app.bookkeeper_model_path = Some(path);
-            app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
+    if let Some(path) = dialog.pick_file() {
+            app.set_bookkeeper_model_selection(
+                app.portable_model_hint(Some(&path)).map(local_selection_id),
+            );
         }
     }
+    ui.small("Local-first by default. Cloud entries are optional and can also power search/summaries when configured with embeddings.");
 
     ui.separator();
     ui.heading("Params");
@@ -101,8 +107,13 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             if let Some(bk) = &app.bookkeeper {
                 bk.shutdown();
             }
-            app.bookkeeper =
-                start_bookkeeper(app.bookkeeper_model_path.clone(), app.logs_dir.clone());
+            app.bookkeeper = start_bookkeeper(
+                app.current_bookkeeper_selection(),
+                app.logs_dir.clone(),
+                app.models_dir.clone(),
+                app.modules_dir.clone(),
+                app.prefs.cloud_models.clone(),
+            );
         }
         if ui.button("Stop").clicked() {
             if let Some(bk) = &app.bookkeeper {

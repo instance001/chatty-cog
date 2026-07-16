@@ -1,4 +1,6 @@
 pub mod app_paths;
+pub mod capability_orchestrator;
+pub mod cloud_ai;
 pub mod llama_dyn;
 pub mod llama_sys;
 pub mod memory;

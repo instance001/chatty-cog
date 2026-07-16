@@ -11,6 +11,7 @@ use anyhow::Context;
 mod chat_actions;
 mod chat_ui;
 mod ecg_window;
+mod host_policy;
 mod logs_ui;
 mod models_ui;
 mod module_ui;
@@ -22,6 +23,11 @@ use chattycog_gui::app_paths::{
     find_default_logs_dir, find_models_dir, find_modules_dir, find_or_create_sandbox_dir,
     find_runtime_windows_dir, read_departments_from_logs_dir, read_gguf_architecture,
     read_lukewarm_from_logs_dir,
+};
+use chattycog_gui::capability_orchestrator::HostCapabilityOrchestrator;
+use chattycog_gui::cloud_ai::{
+    ModelLane, ResolvedModelTarget, build_adapter, cloud_selection_id, local_selection_id,
+    resolve_cloud_target, resolve_model_selection_for_dirs,
 };
 use chattycog_gui::llama_dyn;
 use chattycog_gui::memory::bookkeeper::{
@@ -50,7 +56,8 @@ use chattycog_gui::networking::{
     OutgoingArtifactDelivery, ReceivedArtifact, ReceivedSessionEvent, TrustedPeer,
 };
 use chattycog_gui::preferences::{
-    self, AppPreferences, GenParams, ModulePreferences, PromptCapsule,
+    self, AppPreferences, CloudModelEntry, CloudModelVerificationScope, GenParams,
+    ModulePreferences, PromptCapsule,
 };
 use crossbeam_channel::Receiver;
 use ecg_window::EcgWindowState;
@@ -71,6 +78,167 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(ChattyCogApp::new(cc)))),
     )
+}
+
+fn run_cloud_model_health_check(entry: CloudModelEntry) -> String {
+    let display_name = if entry.display_name.trim().is_empty() {
+        entry.model_name.trim().to_string()
+    } else {
+        entry.display_name.trim().to_string()
+    };
+    let target = match resolve_cloud_target(&entry, ModelLane::Orchestrator) {
+        Ok(target) => target,
+        Err(err) => {
+            return format!("Health check failed for '{}': {err}", display_name);
+        }
+    };
+    let embedding_model_name = target.embedding_model_name.clone();
+    let provider_kind = target.provider_kind.clone();
+    let capabilities = target.capabilities;
+    let client = match build_adapter(target) {
+        Ok(client) => client,
+        Err(err) => {
+            return format!("Health check failed for '{}': {err}", display_name);
+        }
+    };
+
+    let chat_result = match client.chat_completion(
+        "You are a health check. Reply with exactly OK.",
+        "health check",
+        8,
+        0.0,
+        1.0,
+    ) {
+        Ok(reply) => reply,
+        Err(err) => {
+            return format!("Health check failed for '{}': chat test failed: {err}", display_name);
+        }
+    };
+
+    let mut notes = vec![format!("chat OK ({})", truncate_for_ui(&chat_result, 32))];
+    if capabilities.embeddings {
+        if let Some(model_name) = embedding_model_name {
+            match client.embed_text("health check") {
+                Ok(vector) => {
+                    notes.push(format!(
+                        "embeddings OK ({} dims via {})",
+                        vector.len(),
+                        model_name
+                    ));
+                }
+                Err(err) => {
+                    return format!(
+                        "Health check failed for '{}': embeddings test failed: {err}",
+                        display_name
+                    );
+                }
+            }
+        } else {
+            notes.push("embeddings skipped (no embeddings model set)".to_string());
+        }
+    } else if matches!(provider_kind, preferences::CloudProviderKind::Anthropic) {
+        notes.push("embeddings not supported by the current Anthropic adapter".to_string());
+    } else {
+        notes.push("embeddings not supported by this lane".to_string());
+    }
+
+    format!(
+        "Health check passed for '{}': {}.",
+        display_name,
+        notes.join("; ")
+    )
+}
+
+const CLOUD_HEALTH_STALE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+
+fn is_cloud_health_stale_success(
+    status: impl AsRef<str>,
+    checked_at_unix_ms: u64,
+) -> bool {
+    if checked_at_unix_ms == 0 {
+        return false;
+    }
+    if !status.as_ref().trim().starts_with("Health check passed") {
+        return false;
+    }
+    let now = now_unix_ms().max(0) as u64;
+    now.saturating_sub(checked_at_unix_ms) >= CLOUD_HEALTH_STALE_AFTER_MS
+}
+
+fn is_cloud_health_failed(status: impl AsRef<str>) -> bool {
+    status.as_ref().trim().starts_with("Health check failed")
+}
+
+fn cloud_health_verification_scope(status: impl AsRef<str>) -> CloudModelVerificationScope {
+    let status = status.as_ref().trim();
+    if !status.starts_with("Health check passed") {
+        return CloudModelVerificationScope::None;
+    }
+    if status.contains("embeddings OK") {
+        CloudModelVerificationScope::ChatAndEmbeddings
+    } else {
+        CloudModelVerificationScope::ChatOnly
+    }
+}
+
+fn cloud_model_repair_hint(
+    provider_kind: preferences::CloudProviderKind,
+    focus: CloudModelEditorFocusField,
+) -> &'static str {
+    match (provider_kind, focus) {
+        (preferences::CloudProviderKind::Gemini, CloudModelEditorFocusField::BaseUrl) => {
+            "Gemini uses the OpenAI-compatible Google endpoint family here. If the endpoint looks off, try the provider default button to restore `https://generativelanguage.googleapis.com/v1beta/openai`."
+        }
+        (preferences::CloudProviderKind::Gemini, CloudModelEditorFocusField::EmbeddingsModel) => {
+            "Gemini Bookkeeper support needs an embeddings model name too. A common setup here is `gemini-embedding-2-preview`."
+        }
+        (preferences::CloudProviderKind::Anthropic, CloudModelEditorFocusField::EmbeddingsModel) => {
+            "Anthropic embeddings are not exposed by the current ChattyCog adapter, so this lane will not satisfy Bookkeeper yet."
+        }
+        (preferences::CloudProviderKind::Anthropic, CloudModelEditorFocusField::BaseUrl) => {
+            "Anthropic expects its native API base here. If in doubt, use the provider default button to restore `https://api.anthropic.com/v1`."
+        }
+        (preferences::CloudProviderKind::Anthropic, CloudModelEditorFocusField::ApiKey) => {
+            "Anthropic keys here should match the account that can access the selected Claude model."
+        }
+        (preferences::CloudProviderKind::OpenAi, CloudModelEditorFocusField::BaseUrl) => {
+            "OpenAI entries should usually use the standard API base. The provider default button restores `https://api.openai.com/v1`."
+        }
+        (preferences::CloudProviderKind::OpenAiCompatible, CloudModelEditorFocusField::BaseUrl) => {
+            "OpenAI-compatible hosts vary. Double-check the exact base URL and path family your provider expects."
+        }
+        (_, CloudModelEditorFocusField::ApiKey) => {
+            "Check for the right key, the right account, and accidental leading or trailing spaces."
+        }
+        (_, CloudModelEditorFocusField::ChatModel) => {
+            "Verify the model name exactly as the provider exposes it. One character off is enough to fail health checks."
+        }
+        (_, CloudModelEditorFocusField::EmbeddingsModel) => {
+            "If you want Bookkeeper support, this needs a valid embeddings model name that your provider actually exposes."
+        }
+    }
+}
+
+fn cloud_model_repair_action(
+    provider_kind: preferences::CloudProviderKind,
+    focus: CloudModelEditorFocusField,
+) -> Option<(CloudModelEditorRepairAction, &'static str)> {
+    match (provider_kind, focus) {
+        (preferences::CloudProviderKind::OpenAi, CloudModelEditorFocusField::BaseUrl)
+        | (preferences::CloudProviderKind::Anthropic, CloudModelEditorFocusField::BaseUrl)
+        | (preferences::CloudProviderKind::Gemini, CloudModelEditorFocusField::BaseUrl) => Some((
+            CloudModelEditorRepairAction::RestoreProviderDefaultBaseUrl,
+            "Restore provider default base URL",
+        )),
+        (
+            preferences::CloudProviderKind::Gemini,
+            CloudModelEditorFocusField::EmbeddingsModel,
+        ) => Some((
+            CloudModelEditorRepairAction::UseGeminiDefaultEmbeddingsModel,
+            "Use Gemini embeddings default",
+        )),
+        _ => None,
+    }
 }
 
 const FMI_SPLASH_IMAGE_PATH: &str = "assets/branding/fmi-splash-wordmark.png";
@@ -612,6 +780,7 @@ const DEFAULT_SANDBOX_TASK_LEDGER_REL_PATH: &str = "scratchpad/task_ledger.md";
 
 #[derive(Debug, Clone)]
 enum ModelOptionGroup {
+    Cloud,
     VisionReady,
     VisionNeedsMmproj,
     Standard,
@@ -620,14 +789,16 @@ enum ModelOptionGroup {
 impl ModelOptionGroup {
     fn rank(&self) -> u8 {
         match self {
-            Self::VisionReady => 0,
-            Self::VisionNeedsMmproj => 1,
-            Self::Standard => 2,
+            Self::Cloud => 0,
+            Self::VisionReady => 1,
+            Self::VisionNeedsMmproj => 2,
+            Self::Standard => 3,
         }
     }
 
     fn heading(&self) -> &'static str {
         match self {
+            Self::Cloud => "Cloud Models",
             Self::VisionReady => "Vision Ready",
             Self::VisionNeedsMmproj => "Vision Needs Projector",
             Self::Standard => "Text / Other Models",
@@ -640,6 +811,75 @@ struct ModelOption {
     label: String,
     value: String, // stored in prefs; either a filename or "modules/<module_id>/<file>.gguf"
     group: ModelOptionGroup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudModelListFilter {
+    All,
+    UnhealthyOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudModelEditorFocusField {
+    BaseUrl,
+    ChatModel,
+    EmbeddingsModel,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudModelEditorRepairAction {
+    RestoreProviderDefaultBaseUrl,
+    UseGeminiDefaultEmbeddingsModel,
+    UseExampleChatModel,
+    UseExampleEmbeddingsModel,
+    UseLastVerifiedChatModel,
+    UseLastVerifiedEmbeddingsModel,
+}
+
+#[derive(Debug, Clone)]
+struct CloudModelEditorState {
+    edit_id: Option<String>,
+    provider_kind: preferences::CloudProviderKind,
+    display_name: String,
+    base_url: String,
+    model_name: String,
+    embedding_model_name: String,
+    api_key: String,
+    enabled: bool,
+    pending_focus: Option<CloudModelEditorFocusField>,
+    repair_hint: String,
+    repair_action: Option<CloudModelEditorRepairAction>,
+    last_verified_chat_model_name: String,
+    last_verified_embedding_model_name: String,
+    last_verified_scope: CloudModelVerificationScope,
+    health_status: String,
+    health_check_rx: Option<Receiver<String>>,
+    health_check_running: bool,
+}
+
+impl Default for CloudModelEditorState {
+    fn default() -> Self {
+        Self {
+            edit_id: None,
+            provider_kind: preferences::CloudProviderKind::OpenAiCompatible,
+            display_name: String::new(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model_name: String::new(),
+            embedding_model_name: String::new(),
+            api_key: String::new(),
+            enabled: true,
+            pending_focus: None,
+            repair_hint: String::new(),
+            repair_action: None,
+            last_verified_chat_model_name: String::new(),
+            last_verified_embedding_model_name: String::new(),
+            last_verified_scope: CloudModelVerificationScope::None,
+            health_status: String::new(),
+            health_check_rx: None,
+            health_check_running: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1314,6 +1554,14 @@ struct ChattyCogApp {
     lukewarm_summary: String,
     lukewarm_poll_due: Option<Instant>,
     lukewarm_rx: Option<Receiver<String>>,
+    cloud_model_editor: CloudModelEditorState,
+    cloud_model_health_statuses: HashMap<String, String>,
+    cloud_model_health_rx: Option<Receiver<(String, String)>>,
+    cloud_model_health_running_id: Option<String>,
+    cloud_model_health_queue: VecDeque<String>,
+    cloud_model_health_sweep_active: bool,
+    cloud_model_health_sweep_kind: Option<&'static str>,
+    cloud_model_list_filter: CloudModelListFilter,
 
     // UI
     scroll_to_bottom: bool,
@@ -1504,6 +1752,29 @@ impl ChattyCogApp {
                 .unwrap_or_default(),
             lukewarm_poll_due: Some(Instant::now()),
             lukewarm_rx: None,
+            cloud_model_editor: CloudModelEditorState::default(),
+            cloud_model_health_statuses: prefs
+                .cloud_models
+                .iter()
+                .filter_map(|entry| {
+                    let status = entry.last_health_status.trim();
+                    if status.is_empty() {
+                        None
+                    } else {
+                        Some((entry.id.clone(), status.to_string()))
+                    }
+                })
+                .collect(),
+            cloud_model_health_rx: None,
+            cloud_model_health_running_id: None,
+            cloud_model_health_queue: VecDeque::new(),
+            cloud_model_health_sweep_active: false,
+            cloud_model_health_sweep_kind: None,
+            cloud_model_list_filter: if prefs.cloud_models_unhealthy_only {
+                CloudModelListFilter::UnhealthyOnly
+            } else {
+                CloudModelListFilter::All
+            },
             scroll_to_bottom: true,
             ecg_window: EcgWindowState::new("ECG Window - System hardware activity"),
             hot_memory: Vec::new(),
@@ -1588,7 +1859,16 @@ impl ChattyCogApp {
             selected_received_bundle: None,
         };
 
+        app.sync_cloud_model_health_cache_from_prefs();
         app.apply_prefs_to_runtime_settings();
+        if let Some(selection) = app.current_orchestrator_selection() {
+            app.set_active_chat_model_selection(Some(selection));
+        } else if let Some(path) = pick_default_chat_model(&app.models_dir) {
+            app.set_active_chat_model_path(Some(path));
+        }
+        if let Some(selection) = app.current_bookkeeper_selection() {
+            app.set_bookkeeper_model_selection(Some(selection));
+        }
         app.sync_capsule_selection_from_prefs();
         app.ensure_persisted_network_identity();
 
@@ -1801,35 +2081,12 @@ impl ChattyCogApp {
     }
 
     fn set_active_chat_model_path(&mut self, path: Option<PathBuf>) {
-        self.gguf_path = path.clone();
+        let selection = path
+            .as_deref()
+            .and_then(|selected| self.portable_model_hint(Some(selected)))
+            .map(local_selection_id);
+        self.set_active_chat_model_selection(selection);
         if let Some(selected) = path {
-            let label = selected
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| selected.display().to_string());
-            self.runtime_status = match read_gguf_architecture(&selected) {
-                Ok(Some(architecture)) => {
-                    let readiness = if architecture_supports_mtmd(&selected, Some(&architecture)) {
-                        if let Some(mmproj) =
-                            find_matching_mmproj_path(&selected, Some(&architecture))
-                        {
-                            format!(
-                                " | vision ready via {}",
-                                mmproj.file_name().unwrap_or_default().to_string_lossy()
-                            )
-                        } else {
-                            " | current local runtime needs a matching projector".to_string()
-                        }
-                    } else {
-                        String::new()
-                    };
-                    format!("Runtime: selected model {label} [{architecture}]{readiness}")
-                }
-                Ok(None) => format!("Runtime: selected model {label}"),
-                Err(err) => format!(
-                    "Runtime: selected model {label} (could not read GGUF metadata: {err})"
-                ),
-            };
             if let Some(bk) = &self.bookkeeper {
                 bk.append(MemoryEvent {
                     ts_unix_ms: now_unix_ms(),
@@ -1844,13 +2101,18 @@ impl ChattyCogApp {
                     payload_json: None,
                 });
             }
-        } else {
-            self.runtime_status = "Runtime: no GGUF selected".to_string();
         }
     }
 
     fn persist_network_prefs(&mut self) {
         self.ensure_persisted_network_identity();
+        match preferences::save_prefs(&self.prefs_path, &self.prefs) {
+            Ok(()) => {}
+            Err(err) => self.prefs_status = format!("Save failed: {err}"),
+        }
+    }
+
+    fn persist_chat_layout_prefs(&mut self) {
         match preferences::save_prefs(&self.prefs_path, &self.prefs) {
             Ok(()) => {}
             Err(err) => self.prefs_status = format!("Save failed: {err}"),
@@ -3396,37 +3658,17 @@ impl ChattyCogApp {
     }
 
     fn shared_chat_capable_modules(&self) -> Vec<(String, String, bool)> {
-        self.module_registry
-            .modules
-            .iter()
-            .filter_map(|module| {
-                let caps = module.network_capabilities.as_ref()?;
-                let room_aware = caps.has(ModuleNetworkFeature::RoomAware);
-                let multiplayer = caps.has(ModuleNetworkFeature::Multiplayer);
-                if !room_aware && !multiplayer {
-                    return None;
-                }
-                Some((
+        self.capability_orchestrator()
+            .room_capable_modules()
+            .into_iter()
+            .map(|module| {
+                (
                     module.module_id.clone(),
                     module.display_name.clone(),
-                    multiplayer,
-                ))
+                    module.multiplayer,
+                )
             })
             .collect()
-    }
-
-    fn shared_chat_scoped_module_manifest(&self) -> Option<&ModuleManifest> {
-        if self.networking_shared_chat_policy.scope_kind != SharedChatScopeKind::Module {
-            return None;
-        }
-        let scoped_id = self.networking_shared_chat_policy.scope_module_id.trim();
-        if scoped_id.is_empty() {
-            return None;
-        }
-        self.module_registry
-            .modules
-            .iter()
-            .find(|module| module.module_id.trim() == scoped_id)
     }
 
     fn module_manifest_by_id(&self, module_id: &str) -> Option<ModuleManifest> {
@@ -3442,10 +3684,16 @@ impl ChattyCogApp {
     }
 
     fn shared_chat_scoped_module_host_authoritative(&self) -> bool {
-        self.shared_chat_scoped_module_manifest()
-            .and_then(|module| module.network_capabilities.as_ref())
-            .map(|caps| caps.has(ModuleNetworkFeature::HostAuthoritative))
-            .unwrap_or(false)
+        let scoped_id = self.networking_shared_chat_policy.scope_module_id.trim();
+        if scoped_id.is_empty() {
+            return false;
+        }
+        self.capability_orchestrator()
+            .module_is_host_authoritative(scoped_id)
+    }
+
+    fn capability_orchestrator(&self) -> HostCapabilityOrchestrator {
+        HostCapabilityOrchestrator::from_registry(&self.module_registry)
     }
 
     fn shared_chat_scope_label(&self) -> String {
@@ -4128,10 +4376,8 @@ impl ChattyCogApp {
         &self,
         manifest: &ModuleManifest,
     ) -> Option<ModuleBridgeSharedRoomState> {
-        let caps = manifest.network_capabilities.as_ref()?;
-        let room_aware = caps.has(ModuleNetworkFeature::RoomAware);
-        let multiplayer = caps.has(ModuleNetworkFeature::Multiplayer);
-        if !room_aware && !multiplayer {
+        let module_caps = self.capability_orchestrator().module(&manifest.module_id)?.clone();
+        if !module_caps.room_aware && !module_caps.multiplayer {
             return None;
         }
         let scope_matches = self.shared_chat_scope_matches_module(&manifest.module_id);
@@ -4333,14 +4579,13 @@ impl ChattyCogApp {
     fn process_module_outgoing_room_events(&mut self) {
         let snapshot = self.networking.snapshot().clone();
         let room_connection_ids = self.shared_chat_connected_connection_ids();
+        let capability_orchestrator = self.capability_orchestrator();
         for module in &self.module_registry.modules {
-            let Some(caps) = module.network_capabilities.as_ref() else {
+            let Some(module_caps) = capability_orchestrator.module(&module.module_id) else {
                 let _ = clear_bridge_outgoing_room_events(&module.dir);
                 continue;
             };
-            if !caps.has(ModuleNetworkFeature::RoomAware)
-                && !caps.has(ModuleNetworkFeature::Multiplayer)
-            {
+            if !module_caps.room_aware && !module_caps.multiplayer {
                 let _ = clear_bridge_outgoing_room_events(&module.dir);
                 continue;
             }
@@ -4689,6 +4934,498 @@ impl ChattyCogApp {
         )
     }
 
+    fn current_orchestrator_selection(&self) -> Option<String> {
+        self.prefs
+            .orchestrator_model_selection
+            .clone()
+            .or_else(|| self.portable_model_hint(self.gguf_path.as_deref()).map(local_selection_id))
+    }
+
+    fn current_bookkeeper_selection(&self) -> Option<String> {
+        self.prefs
+            .bookkeeper_model_selection
+            .clone()
+            .or_else(|| {
+                self.portable_model_hint(self.bookkeeper_model_path.as_deref())
+                    .map(local_selection_id)
+            })
+    }
+
+    fn resolve_model_selection(
+        &self,
+        selection: Option<&str>,
+        lane: ModelLane,
+    ) -> Option<ResolvedModelTarget> {
+        resolve_model_selection_for_dirs(
+            self.models_dir.as_deref(),
+            self.modules_dir.as_deref(),
+            &self.prefs.cloud_models,
+            selection,
+            lane,
+            resolve_portable_model_hint_for_dirs,
+        )
+    }
+
+    fn set_active_chat_model_selection(&mut self, selection: Option<String>) {
+        self.prefs.orchestrator_model_selection = selection.clone();
+        match self.resolve_model_selection(selection.as_deref(), ModelLane::Orchestrator) {
+            Some(ResolvedModelTarget::Local { selection, path }) => {
+                self.gguf_path = Some(path.clone());
+                self.prefs.orchestrator_model_selection = Some(selection);
+                self.set_runtime_status_for_local_model(&path);
+            }
+            Some(ResolvedModelTarget::Cloud { selection, target }) => {
+                self.gguf_path = None;
+                self.prefs.orchestrator_model_selection = Some(selection);
+                self.runtime_status = format!(
+                    "Runtime: selected cloud model {} [{}]",
+                    target.display_name, target.chat_model_name
+                );
+            }
+            None => {
+                self.gguf_path = None;
+                self.runtime_status = "Runtime: no model selected.".to_string();
+            }
+        }
+        self.save_prefs_quietly();
+    }
+
+    fn set_runtime_status_for_local_model(&mut self, selected: &Path) {
+        let label = selected
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| selected.display().to_string());
+        self.runtime_status = match read_gguf_architecture(selected) {
+            Ok(Some(architecture)) => {
+                let readiness = if architecture_supports_mtmd(selected, Some(&architecture)) {
+                    if let Some(mmproj) = find_matching_mmproj_path(selected, Some(&architecture)) {
+                        format!(
+                            " | vision ready via {}",
+                            mmproj.file_name().unwrap_or_default().to_string_lossy()
+                        )
+                    } else {
+                        " | current local runtime needs a matching projector".to_string()
+                    }
+                } else {
+                    String::new()
+                };
+                format!("Runtime: selected model {label} [{architecture}]{readiness}")
+            }
+            Ok(None) => format!("Runtime: selected model {label}"),
+            Err(err) => format!(
+                "Runtime: selected model {label} (could not read GGUF metadata: {err})"
+            ),
+        };
+    }
+
+    fn set_bookkeeper_model_selection(&mut self, selection: Option<String>) {
+        self.prefs.bookkeeper_model_selection = selection.clone();
+        self.bookkeeper_model_path = match self.resolve_model_selection(
+            selection.as_deref(),
+            ModelLane::Bookkeeper,
+        ) {
+            Some(ResolvedModelTarget::Local { selection, path }) => {
+                self.prefs.bookkeeper_model_selection = Some(selection);
+                Some(path)
+            }
+            Some(ResolvedModelTarget::Cloud { selection, .. }) => {
+                self.prefs.bookkeeper_model_selection = Some(selection);
+                None
+            }
+            None => None,
+        };
+        self.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(300));
+        self.save_prefs_quietly();
+    }
+
+    fn save_prefs_quietly(&mut self) {
+        if let Err(err) = preferences::save_prefs(&self.prefs_path, &self.prefs) {
+            self.prefs_status = format!("Save failed: {err}");
+        }
+    }
+
+    fn sync_cloud_model_health_cache_from_prefs(&mut self) {
+        self.cloud_model_health_statuses = self
+            .prefs
+            .cloud_models
+            .iter()
+            .filter_map(|entry| {
+                let status = entry.last_health_status.trim();
+                if status.is_empty() {
+                    None
+                } else {
+                    Some((entry.id.clone(), status.to_string()))
+                }
+            })
+            .collect();
+    }
+
+    fn load_cloud_model_into_editor(&mut self, entry: &CloudModelEntry) {
+        self.cloud_model_editor.edit_id = Some(entry.id.clone());
+        self.cloud_model_editor.provider_kind = entry.provider_kind.clone();
+        self.cloud_model_editor.display_name = entry.display_name.clone();
+        self.cloud_model_editor.base_url = entry.base_url.clone();
+        self.cloud_model_editor.model_name = entry.model_name.clone();
+        self.cloud_model_editor.embedding_model_name = entry.embedding_model_name.clone();
+        self.cloud_model_editor.api_key = entry.api_key.clone();
+        self.cloud_model_editor.enabled = entry.enabled;
+        self.cloud_model_editor.pending_focus = None;
+        self.cloud_model_editor.repair_hint.clear();
+        self.cloud_model_editor.repair_action = None;
+        self.cloud_model_editor.last_verified_chat_model_name =
+            entry.last_verified_chat_model_name.clone();
+        self.cloud_model_editor.last_verified_embedding_model_name =
+            entry.last_verified_embedding_model_name.clone();
+        self.cloud_model_editor.last_verified_scope = entry.last_verified_scope.clone();
+        self.cloud_model_editor.health_status.clear();
+        self.cloud_model_editor.health_check_rx = None;
+        self.cloud_model_editor.health_check_running = false;
+    }
+
+    fn load_cloud_model_into_editor_with_focus(
+        &mut self,
+        entry: &CloudModelEntry,
+        focus: CloudModelEditorFocusField,
+        reason: &str,
+    ) {
+        self.load_cloud_model_into_editor(entry);
+        self.cloud_model_editor.pending_focus = Some(focus);
+        self.cloud_model_editor.repair_hint =
+            cloud_model_repair_hint(entry.provider_kind.clone(), focus).to_string();
+        self.cloud_model_editor.repair_action =
+            cloud_model_repair_action(entry.provider_kind.clone(), focus).map(|(action, _)| action);
+        self.prefs_status = format!(
+            "Loaded '{}' into the editor. Suggested fix area: {}.",
+            if entry.display_name.trim().is_empty() {
+                entry.model_name.trim()
+            } else {
+                entry.display_name.trim()
+            },
+            reason
+        );
+    }
+
+    fn apply_cloud_model_editor_repair_action(&mut self) {
+        match self.cloud_model_editor.repair_action {
+            Some(CloudModelEditorRepairAction::RestoreProviderDefaultBaseUrl) => {
+                self.cloud_model_editor.base_url = match self.cloud_model_editor.provider_kind {
+                    preferences::CloudProviderKind::OpenAi => {
+                        "https://api.openai.com/v1".to_string()
+                    }
+                    preferences::CloudProviderKind::Anthropic => {
+                        "https://api.anthropic.com/v1".to_string()
+                    }
+                    preferences::CloudProviderKind::Gemini => {
+                        "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
+                    }
+                    preferences::CloudProviderKind::OpenAiCompatible => {
+                        self.cloud_model_editor.base_url.clone()
+                    }
+                };
+                self.cloud_model_editor.pending_focus = Some(CloudModelEditorFocusField::BaseUrl);
+                self.prefs_status = "Restored the provider default base URL.".to_string();
+            }
+            Some(CloudModelEditorRepairAction::UseGeminiDefaultEmbeddingsModel) => {
+                self.cloud_model_editor.embedding_model_name =
+                    "gemini-embedding-2-preview".to_string();
+                self.cloud_model_editor.pending_focus =
+                    Some(CloudModelEditorFocusField::EmbeddingsModel);
+                self.prefs_status = "Filled the Gemini embeddings model with a common default.".to_string();
+            }
+            Some(CloudModelEditorRepairAction::UseExampleChatModel) => {
+                self.cloud_model_editor.model_name = match self.cloud_model_editor.provider_kind {
+                    preferences::CloudProviderKind::OpenAi => "gpt-4.1-mini".to_string(),
+                    preferences::CloudProviderKind::Anthropic => "claude-sonnet-5".to_string(),
+                    preferences::CloudProviderKind::Gemini => "gemini-3.5-flash".to_string(),
+                    preferences::CloudProviderKind::OpenAiCompatible => {
+                        self.cloud_model_editor.model_name.clone()
+                    }
+                };
+                self.cloud_model_editor.pending_focus = Some(CloudModelEditorFocusField::ChatModel);
+                self.prefs_status = "Filled the chat model with the provider example value.".to_string();
+            }
+            Some(CloudModelEditorRepairAction::UseExampleEmbeddingsModel) => {
+                self.cloud_model_editor.embedding_model_name =
+                    match self.cloud_model_editor.provider_kind {
+                        preferences::CloudProviderKind::OpenAi => {
+                            "text-embedding-3-small".to_string()
+                        }
+                        preferences::CloudProviderKind::Gemini => {
+                            "gemini-embedding-2-preview".to_string()
+                        }
+                        preferences::CloudProviderKind::Anthropic => String::new(),
+                        preferences::CloudProviderKind::OpenAiCompatible => {
+                            self.cloud_model_editor.embedding_model_name.clone()
+                        }
+                    };
+                self.cloud_model_editor.pending_focus =
+                    Some(CloudModelEditorFocusField::EmbeddingsModel);
+                self.prefs_status =
+                    "Filled the embeddings model with the provider example value.".to_string();
+            }
+            Some(CloudModelEditorRepairAction::UseLastVerifiedChatModel) => {
+                if !self
+                    .cloud_model_editor
+                    .last_verified_chat_model_name
+                    .trim()
+                    .is_empty()
+                {
+                    self.cloud_model_editor.model_name = self
+                        .cloud_model_editor
+                        .last_verified_chat_model_name
+                        .clone();
+                    self.cloud_model_editor.pending_focus =
+                        Some(CloudModelEditorFocusField::ChatModel);
+                    self.prefs_status =
+                        "Restored the last verified chat model value.".to_string();
+                }
+            }
+            Some(CloudModelEditorRepairAction::UseLastVerifiedEmbeddingsModel) => {
+                self.cloud_model_editor.embedding_model_name = self
+                    .cloud_model_editor
+                    .last_verified_embedding_model_name
+                    .clone();
+                self.cloud_model_editor.pending_focus =
+                    Some(CloudModelEditorFocusField::EmbeddingsModel);
+                self.prefs_status =
+                    "Restored the last verified embeddings model value.".to_string();
+            }
+            None => {}
+        }
+    }
+
+    fn clear_cloud_model_editor(&mut self) {
+        self.cloud_model_editor = CloudModelEditorState::default();
+    }
+
+    fn build_cloud_model_entry_from_editor(&self) -> anyhow::Result<CloudModelEntry> {
+        let display_name = self.cloud_model_editor.display_name.trim().to_string();
+        let base_url = self
+            .cloud_model_editor
+            .base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        let model_name = self.cloud_model_editor.model_name.trim().to_string();
+        let embedding_model_name = self
+            .cloud_model_editor
+            .embedding_model_name
+            .trim()
+            .to_string();
+        let api_key = self.cloud_model_editor.api_key.trim().to_string();
+        if display_name.is_empty() {
+            anyhow::bail!("Display name is required.");
+        }
+        if base_url.is_empty() {
+            anyhow::bail!("Base URL is required.");
+        }
+        if model_name.is_empty() {
+            anyhow::bail!("Model name is required.");
+        }
+        if api_key.is_empty() {
+            anyhow::bail!("API key is required.");
+        }
+
+        let id = self
+            .cloud_model_editor
+            .edit_id
+            .clone()
+            .unwrap_or_else(|| format!("cloud_{}", slugify_filename(&display_name, "cloud_model")));
+        Ok(CloudModelEntry {
+            id: id.clone(),
+            display_name,
+            provider_kind: self.cloud_model_editor.provider_kind.clone(),
+            api_key,
+            base_url,
+            model_name,
+            embedding_model_name,
+            enabled: self.cloud_model_editor.enabled,
+            last_health_status: String::new(),
+            last_health_checked_at_unix_ms: 0,
+            last_verified_chat_model_name: String::new(),
+            last_verified_embedding_model_name: String::new(),
+            last_verified_scope: CloudModelVerificationScope::None,
+        })
+    }
+
+    fn start_cloud_model_health_check(&mut self) {
+        let entry = match self.build_cloud_model_entry_from_editor() {
+            Ok(entry) => entry,
+            Err(err) => {
+                self.cloud_model_editor.health_status =
+                    format!("Health check setup failed: {err}");
+                self.cloud_model_editor.health_check_rx = None;
+                self.cloud_model_editor.health_check_running = false;
+                return;
+            }
+        };
+        self.cloud_model_editor.health_status =
+            "Health check running: validating chat and optional embeddings...".to_string();
+        self.cloud_model_editor.health_check_running = true;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = run_cloud_model_health_check(entry);
+            let _ = tx.send(result);
+        });
+        self.cloud_model_editor.health_check_rx = Some(rx);
+    }
+
+    fn start_saved_cloud_model_health_check(&mut self, entry: &CloudModelEntry) {
+        if self.cloud_model_health_running_id.is_some() {
+            return;
+        }
+        let id = entry.id.clone();
+        let display_name = if entry.display_name.trim().is_empty() {
+            entry.model_name.trim().to_string()
+        } else {
+            entry.display_name.trim().to_string()
+        };
+        self.cloud_model_health_statuses.insert(
+            id.clone(),
+            format!("Health check running for '{}'...", display_name),
+        );
+        self.cloud_model_health_running_id = Some(id.clone());
+        let entry = entry.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = run_cloud_model_health_check(entry);
+            let _ = tx.send((id, result));
+        });
+        self.cloud_model_health_rx = Some(rx);
+    }
+
+    fn start_next_saved_cloud_model_health_check_from_queue(&mut self) {
+        if self.cloud_model_health_running_id.is_some() {
+            return;
+        }
+        while let Some(id) = self.cloud_model_health_queue.pop_front() {
+            if let Some(entry) = self
+                .prefs
+                .cloud_models
+                .iter()
+                .find(|entry| entry.id == id)
+                .cloned()
+            {
+                self.start_saved_cloud_model_health_check(&entry);
+                break;
+            }
+        }
+    }
+
+    fn start_saved_cloud_model_stale_sweep(&mut self) {
+        if self.cloud_model_health_running_id.is_some() || self.cloud_model_health_sweep_active {
+            return;
+        }
+        let stale_ids = self
+            .prefs
+            .cloud_models
+            .iter()
+            .filter(|entry| {
+                is_cloud_health_stale_success(
+                    &entry.last_health_status,
+                    entry.last_health_checked_at_unix_ms,
+                )
+            })
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        if stale_ids.is_empty() {
+            self.prefs_status = "No stale cloud model entries to retest.".to_string();
+            return;
+        }
+        let count = stale_ids.len();
+        self.cloud_model_health_queue = stale_ids.into_iter().collect();
+        self.cloud_model_health_sweep_active = true;
+        self.cloud_model_health_sweep_kind = Some("stale");
+        self.start_next_saved_cloud_model_health_check_from_queue();
+        self.prefs_status = format!(
+            "Retesting {} stale cloud model entr{}.",
+            count,
+            if count == 1 { "y" } else { "ies" }
+        );
+    }
+
+    fn start_saved_cloud_model_failed_sweep(&mut self) {
+        if self.cloud_model_health_running_id.is_some() || self.cloud_model_health_sweep_active {
+            return;
+        }
+        let failed_ids = self
+            .prefs
+            .cloud_models
+            .iter()
+            .filter(|entry| is_cloud_health_failed(&entry.last_health_status))
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        if failed_ids.is_empty() {
+            self.prefs_status = "No failed cloud model entries to retest.".to_string();
+            return;
+        }
+        let count = failed_ids.len();
+        self.cloud_model_health_queue = failed_ids.into_iter().collect();
+        self.cloud_model_health_sweep_active = true;
+        self.cloud_model_health_sweep_kind = Some("failed");
+        self.start_next_saved_cloud_model_health_check_from_queue();
+        self.prefs_status = format!(
+            "Retesting {} failed cloud model entr{}.",
+            count,
+            if count == 1 { "y" } else { "ies" }
+        );
+    }
+
+    fn start_saved_cloud_model_unhealthy_sweep(&mut self) {
+        if self.cloud_model_health_running_id.is_some() || self.cloud_model_health_sweep_active {
+            return;
+        }
+        let unhealthy_ids = self
+            .prefs
+            .cloud_models
+            .iter()
+            .filter(|entry| {
+                is_cloud_health_failed(&entry.last_health_status)
+                    || is_cloud_health_stale_success(
+                        &entry.last_health_status,
+                        entry.last_health_checked_at_unix_ms,
+                    )
+            })
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        if unhealthy_ids.is_empty() {
+            self.prefs_status = "No unhealthy cloud model entries to retest.".to_string();
+            return;
+        }
+        let count = unhealthy_ids.len();
+        self.cloud_model_health_queue = unhealthy_ids.into_iter().collect();
+        self.cloud_model_health_sweep_active = true;
+        self.cloud_model_health_sweep_kind = Some("unhealthy");
+        self.start_next_saved_cloud_model_health_check_from_queue();
+        self.prefs_status = format!(
+            "Retesting {} unhealthy cloud model entr{}.",
+            count,
+            if count == 1 { "y" } else { "ies" }
+        );
+    }
+
+    fn upsert_cloud_model_from_editor(&mut self) -> anyhow::Result<()> {
+        let mut entry = self.build_cloud_model_entry_from_editor()?;
+        let id = entry.id.clone();
+
+        if let Some(existing) = self.prefs.cloud_models.iter_mut().find(|item| item.id == id) {
+            entry.last_health_status = existing.last_health_status.clone();
+            entry.last_health_checked_at_unix_ms = existing.last_health_checked_at_unix_ms;
+            entry.last_verified_chat_model_name = existing.last_verified_chat_model_name.clone();
+            entry.last_verified_embedding_model_name =
+                existing.last_verified_embedding_model_name.clone();
+            entry.last_verified_scope = existing.last_verified_scope.clone();
+            *existing = entry;
+        } else {
+            self.prefs.cloud_models.push(entry);
+            self.prefs
+                .cloud_models
+                .sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+        }
+        self.save_prefs_quietly();
+        Ok(())
+    }
+
     fn build_current_workflow_bundle(&self) -> WorkflowBundle {
         WorkflowBundle {
             version: "1.0".to_string(),
@@ -4696,14 +5433,14 @@ impl ChattyCogApp {
             summary: self.networking_bundle_summary.trim().to_string(),
             created_at_unix_ms: now_unix_ms().max(0) as u64,
             system_prompt: self.current_system_prompt(),
-            orchestrator_model_hint: self.portable_model_hint(self.gguf_path.as_deref()),
+            orchestrator_model_hint: self.current_orchestrator_selection(),
             orchestrator_params: GenParams {
                 temp: self.orch_temp,
                 top_p: self.orch_top_p,
                 top_k: self.orch_top_k,
                 max_tokens: self.orch_max_tokens,
             },
-            bookkeeper_model_hint: self.portable_model_hint(self.bookkeeper_model_path.as_deref()),
+            bookkeeper_model_hint: self.current_bookkeeper_selection(),
             bookkeeper_params: GenParams {
                 temp: self.bookkeeper_temp,
                 top_p: self.bookkeeper_top_p,
@@ -4951,7 +5688,10 @@ impl ChattyCogApp {
                     format!("module `{}` is not installed here", record.module_id),
                 )
             })?;
-        if !module_allows_network_feature(Some(&module), ModuleNetworkFeature::SharedStateReceive) {
+        if !self
+            .capability_orchestrator()
+            .module_allows_feature(&record.module_id, ModuleNetworkFeature::SharedStateReceive)
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
@@ -5205,6 +5945,7 @@ impl ChattyCogApp {
                         .as_ref()
                         .map(|module| module.display_name.clone())
                         .unwrap_or_else(|| record.module_id.clone());
+                    let recommendation = host_policy::workflow_apply_recommendation(self, &record);
                     let title = if record.label.trim().is_empty() {
                         format!("Workflow for {}", module_label)
                     } else {
@@ -5227,27 +5968,7 @@ impl ChattyCogApp {
                             }
                         ));
                     }
-                    if module.is_none() {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(160, 90, 40),
-                            "This target module is not installed here yet. Keep the workflow in the inbox until the module is available.",
-                        );
-                    } else if !module_allows_network_feature(
-                        module.as_ref(),
-                        ModuleNetworkFeature::SharedStateReceive,
-                    ) {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(160, 90, 40),
-                            "This module has not declared `shared_state_receive` support yet, so ChattyCog will keep this workflow in the inbox.",
-                        );
-                    } else if let Some(reason) =
-                        self.stale_module_state_message(&module.as_ref().unwrap().dir, &record)
-                    {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(160, 90, 40),
-                            format!("This looks stale against the currently applied session state: {reason}"),
-                        );
-                    }
+                    ui.colored_label(recommendation.tone, &recommendation.message);
                     if !record.summary.trim().is_empty() {
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new("Summary").strong());
@@ -5255,13 +5976,8 @@ impl ChattyCogApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let can_apply = module.is_some()
-                            && module_allows_network_feature(
-                                module.as_ref(),
-                                ModuleNetworkFeature::SharedStateReceive,
-                            );
                         if ui
-                            .add_enabled(can_apply, egui::Button::new("Apply workflow now"))
+                            .add_enabled(recommendation.can_apply, egui::Button::new("Apply workflow now"))
                             .clicked()
                         {
                             if let Err(err) = self.accept_received_workflow_state(&path) {
@@ -5682,15 +6398,98 @@ impl ChattyCogApp {
         content_type: &str,
         byte_len: u64,
     ) -> Vec<ModuleNetworkAssetLane> {
-        self.module_manifest_by_id(module_id)
-            .and_then(|manifest| manifest.network_capabilities)
-            .map(|caps| {
-                caps.matching_receive_asset_lanes(kind, content_type, byte_len)
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        self.capability_orchestrator()
+            .ranked_receive_asset_lanes_for_module(module_id, kind, content_type, byte_len)
+    }
+
+    fn deliver_received_generic_transfer_to_target(
+        &mut self,
+        path: &Path,
+        module_id: &str,
+        lane_id: &str,
+    ) -> std::io::Result<PathBuf> {
+        let mut record = read_received_generic_transfer_record(path)?;
+        let module_id = module_id.trim();
+        if module_id.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no target module was provided",
+            ));
+        }
+        if !record.module_id.trim().is_empty() && record.module_id.trim() != module_id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "this transfer is already scoped to module `{}`",
+                    record.module_id
+                ),
+            ));
+        }
+        record.module_id = module_id.to_string();
+        let lane = self
+            .matching_module_asset_lanes_for_transfer(
+                &record.module_id,
+                &record.kind,
+                &record.content_type,
+                record.byte_len,
+            )
+            .into_iter()
+            .find(|lane| lane.lane_id.trim() == lane_id.trim())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "no matching incoming asset lane `{}` is declared for {}",
+                        lane_id, record.module_id
+                    ),
+                )
+            })?;
+        let payload_path = self
+            .received_transfer_payload_dir()
+            .join(record.payload_file_name.clone());
+        if !payload_path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("transfer payload missing: {}", payload_path.display()),
+            ));
+        }
+        let payload_bytes = std::fs::read(&payload_path)?;
+        let bridge_record_path =
+            self.deliver_generic_transfer_record_to_lane(&mut record, &payload_bytes, &lane)?;
+        self.persist_received_generic_transfer_record(path, &record)?;
+        self.refresh_received_transfer_inbox();
+        self.selected_received_transfer = Some(path.to_path_buf());
+        self.networking_status = format!(
+            "Networking: delivered `{}` from {} into {} -> {}.",
+            if record.label.trim().is_empty() {
+                record.kind.trim()
+            } else {
+                record.label.trim()
+            },
+            record.from_device_name,
+            lane.label.trim(),
+            bridge_record_path.display()
+        );
+        push_hot_memory(
+            self,
+            format!(
+                "Delivered network transfer into module lane for {}: {}",
+                record.module_id,
+                one_line(
+                    if record.summary.trim().is_empty() {
+                        if record.label.trim().is_empty() {
+                            &record.kind
+                        } else {
+                            &record.label
+                        }
+                    } else {
+                        &record.summary
+                    },
+                    120
+                )
+            ),
+        );
+        Ok(bridge_record_path)
     }
 
     fn deliver_generic_transfer_record_to_lane(
@@ -5784,77 +6583,14 @@ impl ChattyCogApp {
         path: &Path,
         lane_id: &str,
     ) -> std::io::Result<PathBuf> {
-        let mut record = read_received_generic_transfer_record(path)?;
+        let record = read_received_generic_transfer_record(path)?;
         if record.module_id.trim().is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "this transfer is not scoped to a module",
             ));
         }
-        let lane = self
-            .matching_module_asset_lanes_for_transfer(
-                &record.module_id,
-                &record.kind,
-                &record.content_type,
-                record.byte_len,
-            )
-            .into_iter()
-            .find(|lane| lane.lane_id.trim() == lane_id.trim())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "no matching incoming asset lane `{}` is declared for {}",
-                        lane_id, record.module_id
-                    ),
-                )
-            })?;
-        let payload_path = self
-            .received_transfer_payload_dir()
-            .join(record.payload_file_name.clone());
-        if !payload_path.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("transfer payload missing: {}", payload_path.display()),
-            ));
-        }
-        let payload_bytes = std::fs::read(&payload_path)?;
-        let bridge_record_path =
-            self.deliver_generic_transfer_record_to_lane(&mut record, &payload_bytes, &lane)?;
-        self.persist_received_generic_transfer_record(path, &record)?;
-        self.refresh_received_transfer_inbox();
-        self.selected_received_transfer = Some(path.to_path_buf());
-        self.networking_status = format!(
-            "Networking: delivered `{}` from {} into {} -> {}.",
-            if record.label.trim().is_empty() {
-                record.kind.trim()
-            } else {
-                record.label.trim()
-            },
-            record.from_device_name,
-            lane.label.trim(),
-            bridge_record_path.display()
-        );
-        push_hot_memory(
-            self,
-            format!(
-                "Delivered network transfer into module lane for {}: {}",
-                record.module_id,
-                one_line(
-                    if record.summary.trim().is_empty() {
-                        if record.label.trim().is_empty() {
-                            &record.kind
-                        } else {
-                            &record.label
-                        }
-                    } else {
-                        &record.summary
-                    },
-                    120
-                )
-            ),
-        );
-        Ok(bridge_record_path)
+        self.deliver_received_generic_transfer_to_target(path, &record.module_id, lane_id)
     }
 
     fn store_received_generic_transfer(
@@ -5925,28 +6661,21 @@ impl ChattyCogApp {
         let auto_delivered_path = if record.module_id.trim().is_empty() {
             None
         } else {
-            let mut lanes = self
-                .matching_module_asset_lanes_for_transfer(
-                    &record.module_id,
-                    &record.kind,
-                    &record.content_type,
-                    record.byte_len,
-                )
-                .into_iter()
-                .filter(|lane| {
-                    lane.delivery_mode
-                        == chattycog_gui::module_registry::ModuleAssetDeliveryMode::BridgeInbox
-                })
-                .collect::<Vec<_>>();
-            if lanes.len() == 1 {
-                Some(self.deliver_generic_transfer_record_to_lane(
-                    &mut record,
-                    &payload_bytes,
-                    &lanes.remove(0),
-                )?)
-            } else {
-                None
-            }
+            host_policy::preferred_module_asset_lane_for_transfer(
+                self,
+                &record.module_id,
+                &record.kind,
+                &record.content_type,
+                record.byte_len,
+            )
+            .filter(|lane| {
+                lane.delivery_mode
+                    == chattycog_gui::module_registry::ModuleAssetDeliveryMode::BridgeInbox
+            })
+            .map(|lane| {
+                self.deliver_generic_transfer_record_to_lane(&mut record, &payload_bytes, &lane)
+            })
+            .transpose()?
         };
         self.persist_received_generic_transfer_record(&record_path, &record)?;
         self.refresh_received_transfer_inbox();
@@ -6163,6 +6892,12 @@ impl ChattyCogApp {
                             record.byte_len,
                         )
                     };
+                    let transfer_recommendation =
+                        host_policy::transfer_inbox_recommendation(self, &record);
+                    let module_candidates = transfer_recommendation.module_candidates.clone();
+                    let preferred_candidate =
+                        transfer_recommendation.preferred_candidate.clone();
+                    let preferred_lane_id = transfer_recommendation.preferred_lane_id.clone();
                     ui.label(
                         egui::RichText::new(if record.label.trim().is_empty() {
                             record.kind.clone()
@@ -6194,6 +6929,114 @@ impl ChattyCogApp {
                         ui.label(egui::RichText::new("Summary").strong());
                         ui.label(record.summary.trim());
                     }
+                    if record.module_id.trim().is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Host recommendation").strong());
+                        if let Some(candidate) = preferred_candidate.as_ref() {
+                            ui.small(format!(
+                                "ChattyCog recommends {} -> {} for this transfer.",
+                                candidate.display_name,
+                                candidate.lane.label.trim()
+                            ));
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Deliver to host-preferred lane").clicked() {
+                                    if let Err(err) = self.deliver_received_generic_transfer_to_target(
+                                        &path,
+                                        &candidate.module_id,
+                                        &candidate.lane.lane_id,
+                                    ) {
+                                        self.networking_status = format!(
+                                            "Networking: could not deliver that transfer to {} -> {}: {}",
+                                            candidate.display_name,
+                                            candidate.lane.label,
+                                            err
+                                        );
+                                    }
+                                }
+                                if let Some(module_manifest) =
+                                    self.module_manifest_by_id(&candidate.module_id)
+                                {
+                                    if ui.button("Open target lane").clicked() {
+                                        open_path_in_explorer(&bridge_incoming_asset_lane_dir(
+                                            &module_manifest.dir,
+                                            &candidate.lane.lane_id,
+                                        ));
+                                    }
+                                }
+                            });
+                        } else if !module_candidates.is_empty() {
+                            ui.small(
+                                "Multiple modules could receive this transfer, so ChattyCog is showing candidates instead of forcing a destination.",
+                            );
+                        } else {
+                            ui.small(
+                                "No installed module declared a matching incoming asset lane for this transfer yet.",
+                            );
+                        }
+                        if !module_candidates.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("Candidate module lanes").strong());
+                            for candidate in module_candidates.iter().take(4) {
+                                ui.group(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.strong(candidate.display_name.trim());
+                                        ui.small(format!(
+                                            "[{} -> {}]",
+                                            candidate.module_id, candidate.lane.label
+                                        ));
+                                        if preferred_candidate.as_ref().is_some_and(|preferred| {
+                                            preferred.module_id == candidate.module_id
+                                                && preferred.lane.lane_id == candidate.lane.lane_id
+                                        }) {
+                                            ui.small("host-preferred");
+                                        }
+                                        if candidate.host_authoritative {
+                                            ui.small("host-authoritative");
+                                        }
+                                    });
+                                    ui.small(format!(
+                                        "{} | {}{}",
+                                        candidate.lane.direction.label(),
+                                        candidate.lane.delivery_mode.label(),
+                                        if candidate.lane.replayable {
+                                            " | replayable"
+                                        } else {
+                                            ""
+                                        }
+                                    ));
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.button("Deliver here").clicked() {
+                                            if let Err(err) = self
+                                                .deliver_received_generic_transfer_to_target(
+                                                    &path,
+                                                    &candidate.module_id,
+                                                    &candidate.lane.lane_id,
+                                                )
+                                            {
+                                                self.networking_status = format!(
+                                                    "Networking: could not deliver that transfer to {} -> {}: {}",
+                                                    candidate.display_name,
+                                                    candidate.lane.label,
+                                                    err
+                                                );
+                                            }
+                                        }
+                                        if let Some(module_manifest) =
+                                            self.module_manifest_by_id(&candidate.module_id)
+                                        {
+                                            if ui.button("Open lane").clicked() {
+                                                open_path_in_explorer(&bridge_incoming_asset_lane_dir(
+                                                    &module_manifest.dir,
+                                                    &candidate.lane.lane_id,
+                                                ));
+                                            }
+                                        }
+                                    });
+                                });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    }
                     if !record.module_id.trim().is_empty() {
                         ui.add_space(8.0);
                         ui.label(egui::RichText::new("Module asset lanes").strong());
@@ -6219,6 +7062,12 @@ impl ChattyCogApp {
                                             lane.lane_id,
                                             lane.delivery_mode.label()
                                         ));
+                                        if preferred_lane_id
+                                            .as_ref()
+                                            .is_some_and(|preferred| preferred == &lane.lane_id)
+                                        {
+                                            ui.small("host-preferred");
+                                        }
                                     });
                                     let mut meta = vec![lane.direction.label().to_string()];
                                     if !lane.artifact_kinds.is_empty() {
@@ -6371,33 +7220,42 @@ impl ChattyCogApp {
         }
 
         let mut notes = Vec::new();
-        if let Some(path) =
-            self.resolve_portable_model_hint(bundle.orchestrator_model_hint.as_deref())
-        {
-            self.gguf_path = Some(path.clone());
-            notes.push(format!(
-                "orchestrator model -> {}",
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string())
-            ));
-        } else if let Some(hint) = bundle.orchestrator_model_hint.as_deref() {
-            notes.push(format!("orchestrator model missing locally ({hint})"));
+        if let Some(selection) = bundle.orchestrator_model_hint.clone() {
+            match self.resolve_model_selection(Some(&selection), ModelLane::Orchestrator) {
+                Some(ResolvedModelTarget::Local { path, .. }) => {
+                    self.set_active_chat_model_selection(Some(selection.clone()));
+                    notes.push(format!(
+                        "orchestrator model -> {}",
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.display().to_string())
+                    ));
+                }
+                Some(ResolvedModelTarget::Cloud { target, .. }) => {
+                    self.set_active_chat_model_selection(Some(selection.clone()));
+                    notes.push(format!("orchestrator cloud model -> {}", target.display_name));
+                }
+                None => notes.push(format!("orchestrator model missing locally ({selection})")),
+            }
         }
 
-        if let Some(path) =
-            self.resolve_portable_model_hint(bundle.bookkeeper_model_hint.as_deref())
-        {
-            self.bookkeeper_model_path = Some(path.clone());
-            self.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(300));
-            notes.push(format!(
-                "bookkeeper model -> {}",
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string())
-            ));
-        } else if let Some(hint) = bundle.bookkeeper_model_hint.as_deref() {
-            notes.push(format!("bookkeeper model missing locally ({hint})"));
+        if let Some(selection) = bundle.bookkeeper_model_hint.clone() {
+            match self.resolve_model_selection(Some(&selection), ModelLane::Bookkeeper) {
+                Some(ResolvedModelTarget::Local { path, .. }) => {
+                    self.set_bookkeeper_model_selection(Some(selection.clone()));
+                    notes.push(format!(
+                        "bookkeeper model -> {}",
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.display().to_string())
+                    ));
+                }
+                Some(ResolvedModelTarget::Cloud { target, .. }) => {
+                    self.set_bookkeeper_model_selection(Some(selection.clone()));
+                    notes.push(format!("bookkeeper cloud model -> {}", target.display_name));
+                }
+                None => notes.push(format!("bookkeeper model missing locally ({selection})")),
+            }
         }
 
         for (module_id, pref) in &bundle.module_preferences {
@@ -6564,6 +7422,7 @@ impl ChattyCogApp {
                 if let Some(item) = selected_item {
                     let record = item.record.clone();
                     let path = item.path.clone();
+                    let readiness = host_policy::bundle_apply_readiness(self, &record.bundle);
                     let title = if record.label.trim().is_empty() {
                         "Workflow bundle".to_string()
                     } else {
@@ -6583,6 +7442,57 @@ impl ChattyCogApp {
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new("Summary").strong());
                         ui.label(summary);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Host recommendation").strong());
+                    ui.colored_label(
+                        if readiness.recommended {
+                            egui::Color32::from_rgb(50, 110, 70)
+                        } else {
+                            egui::Color32::from_rgb(160, 90, 40)
+                        },
+                        if readiness.summary.trim().is_empty() {
+                            if readiness.recommended {
+                                "This bundle looks ready to apply on this host."
+                            } else {
+                                "This bundle needs a quick compatibility check before apply."
+                            }
+                        } else {
+                            readiness.summary.as_str()
+                        },
+                    );
+                    ui.small(format!(
+                        "Orchestrator hint: {} | Bookkeeper hint: {}",
+                        readiness.orchestrator_model_status, readiness.bookkeeper_model_status
+                    ));
+                    ui.small(format!(
+                        "Installed module prefs: {} / {}",
+                        readiness.installed_module_pref_count,
+                        record.bundle.module_preferences.len()
+                    ));
+                    if !readiness.missing_module_ids.is_empty() {
+                        ui.small(format!(
+                            "Missing modules: {}",
+                            readiness
+                                .missing_module_ids
+                                .iter()
+                                .take(4)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    if !readiness.missing_module_model_ids.is_empty() {
+                        ui.small(format!(
+                            "Module models missing locally: {}",
+                            readiness
+                                .missing_module_model_ids
+                                .iter()
+                                .take(4)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -7029,7 +7939,15 @@ impl ChattyCogApp {
             self.runtime_status = "Runtime: orchestrator paused (module active)".to_string();
             return;
         }
-        self.pulse_ecg(88.0, "Generating a chat response with the local model.");
+        let selection = self.current_orchestrator_selection();
+        let target = self.resolve_model_selection(selection.as_deref(), ModelLane::Orchestrator);
+        let mode_note = match target.as_ref() {
+            Some(ResolvedModelTarget::Cloud { .. }) => {
+                "Generating a chat response with the cloud model."
+            }
+            _ => "Generating a chat response with the local model.",
+        };
+        self.pulse_ecg(88.0, mode_note);
 
         let (tx, rx) = crossbeam_channel::unbounded::<GenEvent>();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -7040,17 +7958,54 @@ impl ChattyCogApp {
         let orch_top_k = self.orch_top_k;
         let orch_max_tokens = self.orch_max_tokens;
         let runtime_dir = find_runtime_windows_dir();
-        let model_label = gguf
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "(no GGUF selected)".to_string());
+        let model_label = match target.as_ref() {
+            Some(ResolvedModelTarget::Local { path, .. }) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string()),
+            Some(ResolvedModelTarget::Cloud { target, .. }) => target.display_name.clone(),
+            None => "(no model selected)".to_string(),
+        };
         let system = self.build_generation_system_prompt(&prompt, &model_label);
+        let target_for_thread = target.clone();
 
         std::thread::spawn(move || {
+            if let Some(ResolvedModelTarget::Cloud { target, .. }) = target_for_thread {
+                let client = match build_adapter(target) {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let _ = tx.send(GenEvent::Error(format!("{e:#}")));
+                        let _ = tx.send(GenEvent::Done);
+                        return;
+                    }
+                };
+                let _ = tx.send(GenEvent::Info(format!(
+                    "Cloud: {} [{}]",
+                    client.display_name(),
+                    client.chat_model_name()
+                )));
+                match client.chat_completion(
+                    &system,
+                    &prompt,
+                    orch_max_tokens.max(1) as usize,
+                    orch_temp,
+                    orch_top_p,
+                ) {
+                    Ok(text) => {
+                        for chunk in text.split_whitespace() {
+                            let _ = tx.send(GenEvent::Token(format!("{chunk} ")));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(GenEvent::Error(format!("{e:#}")));
+                    }
+                }
+                let _ = tx.send(GenEvent::Done);
+                return;
+            }
             if gguf.is_none() {
                 let _ = tx.send(GenEvent::Error(
-                    "No GGUF selected. Use File → Open GGUF...".to_string(),
+                    "No local model selected. Choose a local GGUF or optional cloud entry.".to_string(),
                 ));
                 let _ = tx.send(GenEvent::Done);
                 return;
@@ -7117,7 +8072,9 @@ impl ChattyCogApp {
         }
 
         let Some(model_path) = self.gguf_path.clone() else {
-            self.runtime_status = "Runtime: no GGUF selected for multimodal chat.".to_string();
+            self.runtime_status =
+                "Runtime: multimodal chat currently needs a local vision-ready model."
+                    .to_string();
             return;
         };
         let runtime_dir = match find_runtime_windows_dir() {
@@ -8234,6 +9191,76 @@ impl eframe::App for ChattyCogApp {
             }
         }
 
+        if self.cloud_model_editor.health_check_running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if let Some(rx) = &self.cloud_model_editor.health_check_rx {
+            if let Ok(status) = rx.try_recv() {
+                self.cloud_model_editor.health_status = status;
+                self.cloud_model_editor.health_check_rx = None;
+                self.cloud_model_editor.health_check_running = false;
+            }
+        }
+        if self.cloud_model_health_running_id.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if let Some(rx) = &self.cloud_model_health_rx {
+            if let Ok((id, status)) = rx.try_recv() {
+                self.cloud_model_health_statuses.insert(id.clone(), status);
+                let checked_at = now_unix_ms().max(0) as u64;
+                if let Some(entry) = self.prefs.cloud_models.iter_mut().find(|entry| entry.id == id) {
+                    if let Some(status) = self.cloud_model_health_statuses.get(&id) {
+                        entry.last_health_status = status.clone();
+                    }
+                    entry.last_health_checked_at_unix_ms = checked_at;
+                    if entry.last_health_status.starts_with("Health check passed") {
+                        entry.last_verified_chat_model_name = entry.model_name.clone();
+                        entry.last_verified_embedding_model_name =
+                            entry.embedding_model_name.clone();
+                        entry.last_verified_scope =
+                            cloud_health_verification_scope(&entry.last_health_status);
+                        if self.cloud_model_editor.edit_id.as_deref() == Some(id.as_str()) {
+                            self.cloud_model_editor.last_verified_chat_model_name =
+                                entry.last_verified_chat_model_name.clone();
+                            self.cloud_model_editor.last_verified_embedding_model_name =
+                                entry.last_verified_embedding_model_name.clone();
+                            self.cloud_model_editor.last_verified_scope =
+                                entry.last_verified_scope.clone();
+                        }
+                    }
+                    self.save_prefs_quietly();
+                }
+                self.cloud_model_health_rx = None;
+                self.cloud_model_health_running_id = None;
+                if self.cloud_model_health_sweep_active {
+                    if self.cloud_model_health_queue.is_empty() {
+                        self.cloud_model_health_sweep_active = false;
+                        let kind = self.cloud_model_health_sweep_kind.unwrap_or("saved");
+                        let sweep_ran_at = now_unix_ms().max(0) as u64;
+                        self.prefs.cloud_models_last_sweep_ran_at_unix_ms = sweep_ran_at;
+                        self.prefs.cloud_models_last_sweep_kind = kind.to_string();
+                        if kind == "unhealthy" {
+                            self.prefs.cloud_models_last_unhealthy_sweep_ran_at_unix_ms =
+                                sweep_ran_at;
+                        }
+                        self.save_prefs_quietly();
+                        self.cloud_model_health_sweep_kind = None;
+                        self.prefs_status =
+                            format!("Finished retesting {kind} cloud models.");
+                    } else {
+                        self.start_next_saved_cloud_model_health_check_from_queue();
+                        let kind = self.cloud_model_health_sweep_kind.unwrap_or("saved");
+                        let remaining = self.cloud_model_health_queue.len()
+                            + usize::from(self.cloud_model_health_running_id.is_some());
+                        self.prefs_status = format!(
+                            "Retesting {kind} cloud models... {} remaining.",
+                            remaining,
+                        );
+                    }
+                }
+            }
+        }
+
         if self.tab == Tab::Chat
             && self.runtime_info_rx.is_none()
             && self.runtime_status.contains("(not loaded)")
@@ -8286,8 +9313,13 @@ impl eframe::App for ChattyCogApp {
                 if let Some(bk) = &self.bookkeeper {
                     bk.shutdown();
                 }
-                self.bookkeeper =
-                    start_bookkeeper(self.bookkeeper_model_path.clone(), self.logs_dir.clone());
+                self.bookkeeper = start_bookkeeper(
+                    self.current_bookkeeper_selection(),
+                    self.logs_dir.clone(),
+                    self.models_dir.clone(),
+                    self.modules_dir.clone(),
+                    self.prefs.cloud_models.clone(),
+                );
             } else {
                 ctx.request_repaint_after(Duration::from_millis(33));
             }
@@ -8432,15 +9464,15 @@ impl eframe::App for ChattyCogApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(p) = &self.gguf_path {
-                        let full = format!("GGUF: {}", p.display());
+                        let full = format!("Model: {}", p.display());
                         let short = p
                             .file_name()
                             .map(|name| name.to_string_lossy().to_string())
                             .unwrap_or_else(|| p.display().to_string());
-                        ui.label(format!("GGUF: {}", truncate_for_ui(&short, 56)))
+                        ui.label(format!("Model: {}", truncate_for_ui(&short, 56)))
                             .on_hover_text(full);
                     } else {
-                        ui.label("GGUF: (none)");
+                        ui.label("Model: (none)");
                     }
                 });
             });
@@ -8824,7 +9856,7 @@ fn models_tab_legacy(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
 
     ui.add_space(8.0);
     ui.group(|ui| {
-        ui.heading("Bookkeeper (CPU)");
+        ui.heading("Bookkeeper");
         ui.horizontal(|ui| {
             if ui.button("Copy from current").clicked() {
                 app.prefs.bookkeeper.temp = app.bookkeeper_temp;
@@ -8976,13 +10008,6 @@ fn module_tab(ui: &mut egui::Ui, app: &mut ChattyCogApp, module_id: &str) {
     module_ui::module_tab(ui, app, module_id);
 }
 
-fn module_allows_network_feature(
-    manifest: Option<&ModuleManifest>,
-    feature: ModuleNetworkFeature,
-) -> bool {
-    module_ui::module_allows_network_feature(manifest, feature)
-}
-
 fn open_path_in_explorer(path: &Path) {
     module_ui::open_path_in_explorer(path);
 }
@@ -9096,6 +10121,30 @@ fn build_model_options(
     opts
 }
 
+fn build_hybrid_model_options_for_lane(
+    models_dir: Option<&std::path::Path>,
+    modules_dir: Option<&std::path::Path>,
+    cloud_models: &[CloudModelEntry],
+    lane: ModelLane,
+) -> Vec<ModelOption> {
+    let mut opts = Vec::new();
+    for entry in cloud_models.iter().filter(|entry| entry.enabled) {
+        if chattycog_gui::cloud_ai::resolve_cloud_target(entry, lane).is_ok() {
+            opts.push(ModelOption {
+                label: format!("{} [cloud]", entry.display_name),
+                value: cloud_selection_id(&entry.id),
+                group: ModelOptionGroup::Cloud,
+            });
+        }
+    }
+
+    for mut option in build_model_options(models_dir, modules_dir) {
+        option.value = local_selection_id(&option.value);
+        opts.push(option);
+    }
+    opts
+}
+
 fn portable_model_hint_for_dirs(
     models_dir: Option<&Path>,
     modules_dir: Option<&Path>,
@@ -9173,6 +10222,7 @@ fn resolve_portable_model_hint_for_dirs(
 
     None
 }
+
 
 fn selected_model_option_label(
     model_opts: &[ModelOption],
@@ -9729,22 +10779,48 @@ fn add_presets_prefs_bookkeeper(ui: &mut egui::Ui, p: &mut GenParams) {
 }
 
 fn start_bookkeeper(
-    model_path: Option<PathBuf>,
+    model_selection: Option<String>,
     logs_dir: Option<PathBuf>,
+    models_dir: Option<PathBuf>,
+    modules_dir: Option<PathBuf>,
+    cloud_models: Vec<CloudModelEntry>,
 ) -> Option<BookkeeperHandle> {
-    let runtime_dir = find_runtime_windows_dir().ok()?;
-    let models_dir = find_models_dir()?;
-
-    let model_path = model_path
-        .filter(|p| p.is_file())
-        .or_else(|| pick_default_bookkeeper_model(&Some(models_dir)))?;
-
     let data_dir = logs_dir
         .or_else(find_default_logs_dir)
         .unwrap_or_else(|| PathBuf::from("memory"));
 
     let cfg = BookkeeperConfig::default();
-    BookkeeperHandle::start(runtime_dir, model_path, data_dir, cfg).ok()
+    let target = resolve_model_selection_for_dirs(
+        models_dir.as_deref(),
+        modules_dir.as_deref(),
+        &cloud_models,
+        model_selection.as_deref(),
+        ModelLane::Bookkeeper,
+        resolve_portable_model_hint_for_dirs,
+    )
+    .or_else(|| {
+        pick_default_bookkeeper_model(&models_dir).map(|path| ResolvedModelTarget::Local {
+            selection: local_selection_id(
+                portable_model_hint_for_dirs(
+                    models_dir.as_deref(),
+                    modules_dir.as_deref(),
+                    Some(&path),
+                )
+                .unwrap_or_else(|| path.display().to_string()),
+            ),
+            path,
+        })
+    })?;
+
+    match target {
+        ResolvedModelTarget::Local { path, .. } => {
+            let runtime_dir = find_runtime_windows_dir().ok()?;
+            BookkeeperHandle::start_local(runtime_dir, path, data_dir, cfg).ok()
+        }
+        ResolvedModelTarget::Cloud { target, .. } => {
+            BookkeeperHandle::start_cloud(target, data_dir, cfg).ok()
+        }
+    }
 }
 
 fn ensure_default_sandbox_scratchpad_file(dir: &Path) -> anyhow::Result<PathBuf> {
@@ -9797,6 +10873,10 @@ fn pick_default_bookkeeper_model(models_dir: &Option<PathBuf>) -> Option<PathBuf
         }
     }
     None
+}
+
+fn pick_default_chat_model(models_dir: &Option<PathBuf>) -> Option<PathBuf> {
+    scan_ggufs(models_dir.as_deref()).into_iter().next()
 }
 
 fn list_dir_files(dir: &std::path::Path) -> Vec<PathBuf> {
@@ -9856,9 +10936,9 @@ fn build_wakeup_orientation(
     format!(
         "Welcome to the Cockpit Protocol.\n\
 0. First state: the current user message is the active signal. Do not search memory, modules, logs, or sandbox context to invent extra tasks. Partnership first. Task second.\n\
-1. Where you are: you are a local GGUF model inside ChattyCog, a desktop workspace running on the user's own hardware. You are not a cloud service, API endpoint, benchmark, lab, or compliance test.\n\
-2. What this space is: ChattyCog is a local working cockpit for thinking, building, writing, inspecting, planning, and coordinating modules around a local model.\n\
-3. Your role: you are a local working partner. Do the useful thing plainly; do not posture, over-demonstrate, or chase hidden expectations.\n\
+1. Where you are: you are ChattyCog inside the user's own desktop workspace. The current lane may be local-first or an optional user-chosen cloud model. You are not a benchmark, lab, compliance test, or theatrical persona.\n\
+2. What this space is: ChattyCog is a local-first working cockpit for thinking, building, writing, inspecting, planning, and coordinating modules, with optional cloud reach when the user chooses it.\n\
+3. Your role: you are a practical working partner. Do the useful thing plainly; do not posture, over-demonstrate, or chase hidden expectations.\n\
 4. Your tools: {sandbox_line} {tool_line}\n\
 5. What this space is not: it is more than a chat window, but ordinary conversation is still valid. Background notes are instruments, not orders.\n\
 6. What done looks like: a clear answer, plan, inspected result, requested action, or completed artifact. When you reach that, stop. Done is done.\n\

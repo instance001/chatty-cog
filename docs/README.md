@@ -1,12 +1,24 @@
 # chatty-cog
 
-Offline-first, tabbed desktop GUI for chatting with local **GGUF** models via a bundled **llama.cpp** runtime on Windows.
+Local-first, tabbed desktop GUI for hybrid AI workflows on Windows.
 
-chatty-cog does not require internet or cloud services to function. It can also optionally connect to other nearby chatty-cog instances over local Wi-Fi or LAN when a user deliberately enables local networking.
+Core stance:
+
+- local when you want privacy, low friction, and no account dependency
+- cloud when you need a stronger or more specialized model
+- hybrid when the task calls for the right tool rather than one ideology
+
+chatty-cog does not require internet or cloud services to function. Local use remains the default foundation. But the app can now also surface optional BYO cloud model entries beside local GGUFs so the user can decide what fits the current job best instead of being trapped in one lane.
+
+That means user sovereignty is the point:
+
+- keep local-first as the baseline
+- make cloud optional, not mandatory
+- let the operator choose the right model for the task at hand
 
 That peer-to-peer mode is only for chatty-cog-to-chatty-cog connections. It is intentionally incompatible with chatty-edu networking.
 
-This repo currently contains one Rust GUI app: `chattycog_gui/`.
+This repo currently contains one Rust GUI app crate: `chattycog_gui`.
 
 ## Quickstart (Windows)
 
@@ -15,41 +27,58 @@ This repo currently contains one Rust GUI app: `chattycog_gui/`.
 - Install LLVM (for bindgen / libclang). Default path assumed: `C:\Program Files\LLVM\bin`.
 
 2) Folder layout
-- `chattycog_gui/models/` - put your `.gguf` files here
-- `chattycog_gui/runtime/windows/` - put `llama.dll` + `ggml-*.dll` backends here (Vulkan + CPU)
-- `chattycog_gui/modules/` - drop-in modules (each module needs a `manifest.json`)
-- `chattycog_gui/Chatty_Sandbox/` - scratch folder the app can browse/edit (and the orchestrator can access via user-approved tool requests)
-- `chattycog_gui/memory/` - local logs and summaries:
+- `models/` - put your `.gguf` files here
+- `runtime/windows/` - put `llama.dll` + `ggml-*.dll` backends here (Vulkan + CPU)
+- `modules/` - drop-in modules (each module needs a `manifest.json`)
+- `Chatty_Sandbox/` - scratch folder the app can browse/edit (and the orchestrator can access via user-approved tool requests)
+- `memory/` - local logs and summaries:
   - `cold_log.jsonl` (long-term, append-only log)
   - `lukewarm.txt` (rolling summary)
   - `departments.md` / `departments.json` (latest per-module "what happened" rundowns)
 
 3) Build + run
 ```bash
-cargo build --manifest-path chattycog_gui/Cargo.toml
-cargo run  --manifest-path chattycog_gui/Cargo.toml --bin chattycog_gui
+cargo build --bin chattycog_gui
+cargo run --bin chattycog_gui
 ```
 
 Optional smoke test (loads runtime + runs a tiny generation):
 ```bash
-cargo run --manifest-path chattycog_gui/Cargo.toml --bin smoke_llama
+cargo run --bin smoke_llama
 ```
 
 ## What you get
 
-- **Chat tab**: talk to a selected GGUF model (streaming tokens).
+- **Chat tab**: talk to a selected local or BYO cloud model.
 - **Chat runtime visibility**:
-  - runtime status shows whether ChattyCog is on a GPU/Vulkan path, CPU path, or error path
-  - the chat header now includes a GGUF selector, `Open GGUF...`, `Refresh models`, and a live `Chat max tokens` readout
+  - runtime status shows whether ChattyCog is on a local GPU/Vulkan path, local CPU path, cloud path, or error path
+  - the chat header now includes a unified model selector, `Open GGUF...`, `Refresh models`, and a live `Chat max tokens` readout
   - the chat composer enters a `Please wait` state while a reply is still generating, so rapid-fire extra turns do not get injected into the same inference run
   - assistant reasoning can be expanded/collapsed in-place from a dedicated disclosure row
   - inline `Interrupt` button lets you stop the current reply without leaving the composer
 - **Chat layout**:
-  - three-column chat workspace with `Hot Memory` on the left, the main transcript in the center, and `Luke Warm` memory on the right
+  - anchored three-column chat workspace with `Hot Memory` on the left, the main transcript in the center, and `Luke Warm` memory on the right
+  - the transcript and assistant thinking views are clamped to the center panel width so long sessions should wrap inward instead of slowly widening the whole workspace
   - multiline composer (`Enter` sends, `Shift+Enter` adds a new line)
 - **Hot memory**: small, user-visible "working set" of recent/pinned items.
+- **Models tab control surface**:
+  - add BYO cloud model entries in-app
+  - choose between OpenAI, OpenAI-compatible, Anthropic, and Gemini provider families
+  - test connection health before saving or selecting an entry
+  - keep last-known health state and last-check freshness visible in the saved list
+  - retest stale saved cloud entries in one sweep
+  - retest failed saved cloud entries in one sweep
+  - filter the saved list down to unhealthy cloud entries only
+  - float unhealthy cloud entries to the top in the normal all-entries view
+  - click failure reason chips to jump a saved entry back into the editor with likely-fix focus
+  - show a short provider-aware repair hint after those chip-driven editor jumps
+  - offer one-click safe autofills in that hint area when ChattyCog knows the correction
+  - offer one-click exact-value helpers beside provider example model strings
+  - remember last verified working model strings per saved cloud entry
+  - keep cloud models listed beside local GGUFs
+  - choose separate model targets for the main orchestrator and the Bookkeeper
 - **Logs tab**:
-  - CPU-only **bookkeeper** that records events/messages to disk (`cold_log.jsonl`)
+  - **bookkeeper** that records events/messages to disk (`cold_log.jsonl`)
   - semantic search (Option B, embeddings) + keyword search fallback (Option A)
   - "Luke Warm" rolling summary persisted to `lukewarm.txt`
   - semantic search filters by `module_id` (department) and/or `tag`
@@ -60,7 +89,7 @@ cargo run --manifest-path chattycog_gui/Cargo.toml --bin smoke_llama
   - choose `Create file` or `Edit file`, set a target `.md` / `.txt` path, and ChattyCog will steer the model toward deterministic sandbox JSON instead of making it infer intent from freeform wording
   - approved sandbox actions automatically open the touched file and focus the Sandbox tab
 - **Capsule library**:
-  - the Preferences tab includes a reusable capsule library for saved personality / behavior injections
+  - the Models tab includes a reusable capsule library for saved personality / behavior injections
   - users can save multiple named capsules, activate one for the current task, or fall back to native ChattyCog voice
 - **Networking tab**:
   - discover nearby ChattyCog instances on the same trusted local network
@@ -130,10 +159,10 @@ What it does is give them a shared working surface, a shared handoff language, a
 
 - If chat replies still feel cut off too early:
   - confirm the chat header `Chat max tokens` value is what you expect
-  - the Preferences tab now updates live chat settings immediately, and the next Save will persist them to `config/preferences.json`
+  - the Models tab now updates live chat settings immediately, and the next Save will persist them to `config/preferences.json`
 - If the app can't load the runtime, check:
-  - `chattycog_gui/runtime/windows/llama.dll` exists
-  - `chattycog_gui/runtime/windows/ggml.dll` exists
+  - `runtime/windows/llama.dll` exists
+  - `runtime/windows/ggml.dll` exists
   - Vulkan driver is installed (Vulkan loader typically comes with the GPU driver)
 - If build fails in `build.rs` with libclang errors:
   - ensure LLVM is installed and `LIBCLANG_PATH` points to the LLVM `bin` folder

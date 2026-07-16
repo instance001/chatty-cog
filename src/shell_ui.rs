@@ -321,9 +321,9 @@ pub(super) fn settings_tab(ui: &mut egui::Ui, _app: &mut ChattyCogApp) {
 pub(super) fn about_tab(ui: &mut egui::Ui) {
     ui.heading("ChattyCog");
     ui.separator();
-    ui.label("Old-school, tabbed desktop UI for chatting with local GGUF models.");
+    ui.label("Old-school, tabbed desktop UI for local-first, cloud-optional AI work.");
     ui.add_space(8.0);
-    ui.label("Status: llama.cpp runtime wired (llama.dll + ggml backends).");
+    ui.label("Status: local llama.cpp runtime wired, with optional BYO cloud lanes.");
     ui.add_space(12.0);
     ui.group(|ui| {
         ui.heading("Project Identity");

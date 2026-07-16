@@ -47,6 +47,60 @@ impl Default for ModulePreferences {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudProviderKind {
+    OpenAi,
+    OpenAiCompatible,
+    Anthropic,
+    Gemini,
+}
+
+impl Default for CloudProviderKind {
+    fn default() -> Self {
+        Self::OpenAiCompatible
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudModelVerificationScope {
+    #[default]
+    None,
+    ChatOnly,
+    ChatAndEmbeddings,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct CloudModelEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub provider_kind: CloudProviderKind,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model_name: String,
+    #[serde(default)]
+    pub embedding_model_name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_health_status: String,
+    #[serde(default)]
+    pub last_health_checked_at_unix_ms: u64,
+    #[serde(default)]
+    pub last_verified_chat_model_name: String,
+    #[serde(default)]
+    pub last_verified_embedding_model_name: String,
+    #[serde(default)]
+    pub last_verified_scope: CloudModelVerificationScope,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PromptCapsule {
     #[serde(default)]
@@ -63,6 +117,10 @@ pub struct AppPreferences {
     pub network_recoverable_shared_chat_policy_json: Option<String>,
     #[serde(default)]
     pub active_orchestrator_capsule: Option<String>,
+    #[serde(default)]
+    pub orchestrator_model_selection: Option<String>,
+    #[serde(default)]
+    pub bookkeeper_model_selection: Option<String>,
     #[serde(default)]
     pub orchestrator: GenParams,
     #[serde(default)]
@@ -85,8 +143,25 @@ pub struct AppPreferences {
     pub allow_sandbox_tool_requests: bool,
     #[serde(default = "default_true")]
     pub auto_generate_module_suspend_rundown: bool,
+    #[serde(
+        default = "default_chat_right_panel_width",
+        alias = "chat_left_panel_width"
+    )]
+    pub chat_right_panel_width: f32,
+    #[serde(default)]
+    pub cloud_models_advanced_open: bool,
+    #[serde(default)]
+    pub cloud_models_unhealthy_only: bool,
+    #[serde(default)]
+    pub cloud_models_last_sweep_ran_at_unix_ms: u64,
+    #[serde(default)]
+    pub cloud_models_last_sweep_kind: String,
+    #[serde(default)]
+    pub cloud_models_last_unhealthy_sweep_ran_at_unix_ms: u64,
     #[serde(default)]
     pub orchestrator_capsules: Vec<PromptCapsule>,
+    #[serde(default)]
+    pub cloud_models: Vec<CloudModelEntry>,
     #[serde(default)]
     pub modules: HashMap<String, ModulePreferences>, // module_id -> prefs
 }
@@ -105,6 +180,8 @@ impl Default for AppPreferences {
             network_device_id: String::new(),
             network_recoverable_shared_chat_policy_json: None,
             active_orchestrator_capsule: None,
+            orchestrator_model_selection: None,
+            bookkeeper_model_selection: None,
             orchestrator: GenParams::default(),
             bookkeeper: GenParams {
                 temp: 0.2,
@@ -121,7 +198,14 @@ impl Default for AppPreferences {
             network_device_groups: HashMap::new(),
             allow_sandbox_tool_requests: true,
             auto_generate_module_suspend_rundown: true,
+            chat_right_panel_width: default_chat_right_panel_width(),
+            cloud_models_advanced_open: false,
+            cloud_models_unhealthy_only: false,
+            cloud_models_last_sweep_ran_at_unix_ms: 0,
+            cloud_models_last_sweep_kind: String::new(),
+            cloud_models_last_unhealthy_sweep_ran_at_unix_ms: 0,
             orchestrator_capsules: Vec::new(),
+            cloud_models: Vec::new(),
             modules: HashMap::new(),
         }
     }
@@ -129,6 +213,10 @@ impl Default for AppPreferences {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_chat_right_panel_width() -> f32 {
+    240.0
 }
 
 pub fn default_prefs_path() -> Result<PathBuf> {
@@ -157,9 +245,32 @@ pub fn load_prefs(path: &Path) -> Result<AppPreferences> {
     if prefs.bookkeeper.max_tokens <= 0 {
         prefs.bookkeeper.max_tokens = 256;
     }
+    if !prefs.chat_right_panel_width.is_finite() || prefs.chat_right_panel_width <= 0.0 {
+        prefs.chat_right_panel_width = default_chat_right_panel_width();
+    }
     prefs
         .orchestrator_capsules
         .retain(|capsule| !capsule.name.trim().is_empty() && !capsule.text.trim().is_empty());
+    prefs.cloud_models.retain_mut(|entry| {
+        entry.id = entry.id.trim().to_string();
+        entry.display_name = entry.display_name.trim().to_string();
+        entry.api_key = entry.api_key.trim().to_string();
+        entry.base_url = entry.base_url.trim().trim_end_matches('/').to_string();
+        entry.model_name = entry.model_name.trim().to_string();
+        entry.embedding_model_name = entry.embedding_model_name.trim().to_string();
+        entry.last_health_status = entry.last_health_status.trim().to_string();
+        entry.last_verified_chat_model_name = entry.last_verified_chat_model_name.trim().to_string();
+        entry.last_verified_embedding_model_name =
+            entry.last_verified_embedding_model_name.trim().to_string();
+        if entry.display_name.is_empty() {
+            entry.display_name = entry.model_name.clone();
+        }
+        !entry.id.is_empty()
+            && !entry.display_name.is_empty()
+            && !entry.api_key.is_empty()
+            && !entry.base_url.is_empty()
+            && !entry.model_name.is_empty()
+    });
     Ok(prefs)
 }
 

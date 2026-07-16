@@ -328,7 +328,7 @@ When a module tab is left or closed:
 - it tails any declared files in `bridge/log_sources.json`
 - it appends the `summary` to cold memory
 - it updates department status files used by the main Chat tab
-- if only a `snapshot` exists, the CPU-only Bookkeeper can summarize it
+- if only a `snapshot` exists, the Bookkeeper can summarize it through its current local or cloud lane
 - if the module declared recent logs, those log tails are included in the auto-generated rundown context
 
 ## Shipped examples

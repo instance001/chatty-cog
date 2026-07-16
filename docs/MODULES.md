@@ -11,15 +11,15 @@ Important boundary:
 
 ## What is a module?
 
-A module is a folder dropped into `chattycog_gui/modules/` that contains a `manifest.json`.
+A module is a folder dropped into `modules/` that contains a `manifest.json`.
 
 ChattyCog scans that directory at startup (and on **Modules -> Rescan modules**) and lets the user open modules as closable tabs.
 
 Starter templates live in:
 
-- `chattycog_gui/module_templates/`
+- `module_templates/`
 
-That location is intentional so templates do not appear as live modules until you copy them into `chattycog_gui/modules/`.
+That location is intentional so templates do not appear as live modules until you copy them into `modules/`.
 
 If you are unsure which starter fits your module best:
 
@@ -33,7 +33,7 @@ If you are unsure which starter fits your module best:
 ## Directory layout
 
 ```
-chattycog_gui/
+chatty-cog/
   modules/
     your_module/
       manifest.json
@@ -71,7 +71,7 @@ Required fields:
 
 Optional fields (supported today):
 - `ai_enabled` (bool): if `true`, ChattyCog shows a "Module AI (demo)" runner in the tab.
-- `default_model` (string): a GGUF filename (from `chattycog_gui/models/`) to preselect for the module AI runner.
+- `default_model` (string): a GGUF filename (from `models/`) to preselect for the module AI runner.
 - `visual_load` (object): optional inline visual-hosting block. In practice, a separate `visual_load.json` companion file is cleaner.
 - `network_capabilities` (object): optional inline declaration of which network-sharing lanes the module intentionally supports. In practice, a separate `network_capabilities.json` companion file is cleaner.
 
@@ -82,9 +82,9 @@ Notes:
 ## Discovery rules
 
 Discovery scans only:
-- `chattycog_gui/modules/*/manifest.json`
-- `chattycog_gui/modules/*/visual_load.json` (optional companion file)
-- `chattycog_gui/modules/*/network_capabilities.json` (optional companion file)
+- `modules/*/manifest.json`
+- `modules/*/visual_load.json` (optional companion file)
+- `modules/*/network_capabilities.json` (optional companion file)
 
 It does not recurse deeper than one folder level.
 
@@ -169,16 +169,16 @@ See also:
 - `docs/MODULE_VISUAL_LOAD.md`
 - `docs/MODULE_BRIDGE.md`
 - `docs/MODULE_BRIDGE_SNIPPETS.md`
-- `chattycog_gui/module_templates/template_module/`
-- `chattycog_gui/module_templates/template_native_rust_module/`
-- `chattycog_gui/module_templates/template_python_module/`
+- `module_templates/template_module/`
+- `module_templates/template_native_rust_module/`
+- `module_templates/template_python_module/`
 - `docs/MODULE_VISUAL_LOAD_TEMPLATE.json`
 - `docs/MODULE_VISUAL_LOAD_WEBVIEW_TEMPLATE.json`
 
 ### Module Workspace UI (`ui.json`) - recommended
 
 If a module folder contains `ui.json`, ChattyCog renders it as a native-feeling module surface (section cards + sidebar when available) and persists values to:
-- `chattycog_gui/modules/<module>/state.json`
+- `modules/<module>/state.json`
 
 This is the recommended way for modules to provide their "own display" inside a ChattyCog tab without custom code changes in ChattyCog itself.
 
@@ -234,8 +234,8 @@ When the user leaves a module tab (or closes it), ChattyCog emits a cold-log eve
 
 If your module keeps its own native UI or webview state, let the module report back through:
 
-- `chattycog_gui/modules/<module>/bridge/status.json`
-- `chattycog_gui/modules/<module>/bridge/log_sources.json` (optional; module-local logs ChattyCog may tail for context)
+- `modules/<module>/bridge/status.json`
+- `modules/<module>/bridge/log_sources.json` (optional; module-local logs ChattyCog may tail for context)
 
 This keeps the module portable:
 
@@ -273,7 +273,7 @@ See:
 
 If your module participates in LAN sharing, add:
 
-- `chattycog_gui/modules/<module>/network_capabilities.json`
+- `modules/<module>/network_capabilities.json`
 
 Example:
 
@@ -337,16 +337,16 @@ Why this exists:
 
 #### Auto-generation (recommended)
 
-If **Preferences -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled:
+If **Models -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** is enabled:
 - ChattyCog first checks whether the module already supplied `bridge/status.json`.
 - If the bridge contains a `summary`, ChattyCog uses that directly.
-- If the bridge contains only a richer `snapshot`, the CPU-only Bookkeeper summarizes that.
+- If the bridge contains only a richer `snapshot`, the Bookkeeper summarizes that through its current local or cloud lane.
 - If `bridge/log_sources.json` exists, ChattyCog also tails the declared module-local logs and includes them in the Bookkeeper context bundle.
 - If no bridge exists, ChattyCog falls back to its own form/workspace snapshot (plus last module AI output if any).
-- The CPU-only Bookkeeper generates a short rundown automatically.
+- The Bookkeeper generates a short rundown automatically.
 - The rundown is appended to the cold log and also updates:
-  - `chattycog_gui/memory/departments.md`
-  - `chattycog_gui/memory/departments.json`
+  - `memory/departments.md`
+  - `memory/departments.json`
 
 These files represent the latest per-module status and are what the orchestrator reads for cross-module awareness.
 
@@ -362,8 +362,8 @@ This uses the same local llama.cpp runtime as the Chat tab.
 ## Orchestrator "Debrief" (department + lukewarm injection)
 
 Before each orchestrator generation, ChattyCog reads:
-- `chattycog_gui/memory/departments.md` (latest per-module rundowns)
-- `chattycog_gui/memory/lukewarm.txt` (rolling recent activity summary)
+- `memory/departments.md` (latest per-module rundowns)
+- `memory/lukewarm.txt` (rolling recent activity summary)
 
 and injects them into the system prompt under:
 - `### DEPARTMENT STATUS UPDATES`
@@ -371,7 +371,7 @@ and injects them into the system prompt under:
 
 ## Cold Log Envelope (schemaless standard)
 
-ChattyCog stores long-term memory in `chattycog_gui/memory/cold_log.jsonl`.
+ChattyCog stores long-term memory in `memory/cold_log.jsonl`.
 
 Recommended convention for module events:
 
