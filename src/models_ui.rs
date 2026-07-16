@@ -257,9 +257,9 @@ fn cloud_provider_example_embedding_model(kind: preferences::CloudProviderKind) 
 fn cloud_verification_scope_label(scope: &CloudModelVerificationScope) -> &'static str {
     match scope {
         CloudModelVerificationScope::None => "not yet verified",
-        CloudModelVerificationScope::ChatOnly => "verified for chat only",
+        CloudModelVerificationScope::ChatOnly => "chat ready only",
         CloudModelVerificationScope::ChatAndEmbeddings => {
-            "verified for chat + embeddings"
+            "chat + Bookkeeper ready"
         }
     }
 }
@@ -275,7 +275,7 @@ fn cloud_bookkeeper_ready_badge(ui: &mut egui::Ui, scope: &CloudModelVerificatio
         CloudModelVerificationScope::ChatOnly => {
             ui.colored_label(
                 egui::Color32::from_rgb(150, 130, 80),
-                "[chat-only]",
+                "[chat-ready]",
             );
         }
         CloudModelVerificationScope::None => {}
@@ -814,8 +814,8 @@ fn render_models_cloud_registry(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                     "[bookkeeper-ready]",
                 );
                 ui.small("chat + embeddings verified");
-                ui.colored_label(egui::Color32::from_rgb(150, 130, 80), "[chat-only]");
-                ui.small("chat verified, embeddings not proven");
+                ui.colored_label(egui::Color32::from_rgb(150, 130, 80), "[chat-ready]");
+                ui.small("chat works, Bookkeeper not ready yet");
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -973,7 +973,7 @@ fn render_models_cloud_registry(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 if entry.last_verified_scope != CloudModelVerificationScope::None {
                     cloud_bookkeeper_ready_badge(ui, &entry.last_verified_scope);
                     ui.small(format!(
-                        "scope: {}",
+                        "status: {}",
                         cloud_verification_scope_label(&entry.last_verified_scope)
                     ));
                 }

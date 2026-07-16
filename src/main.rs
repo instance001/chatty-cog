@@ -116,10 +116,12 @@ fn run_cloud_model_health_check(entry: CloudModelEntry) -> String {
     };
 
     let mut notes = vec![format!("chat OK ({})", truncate_for_ui(&chat_result, 32))];
+    let mut bookkeeper_ready = false;
     if capabilities.embeddings {
         if let Some(model_name) = embedding_model_name {
             match client.embed_text("health check") {
                 Ok(vector) => {
+                    bookkeeper_ready = true;
                     notes.push(format!(
                         "embeddings OK ({} dims via {})",
                         vector.len(),
@@ -127,10 +129,11 @@ fn run_cloud_model_health_check(entry: CloudModelEntry) -> String {
                     ));
                 }
                 Err(err) => {
-                    return format!(
-                        "Health check failed for '{}': embeddings test failed: {err}",
-                        display_name
-                    );
+                    notes.push(format!(
+                        "embeddings failed via {} ({})",
+                        model_name,
+                        truncate_for_ui(&err.to_string(), 120)
+                    ));
                 }
             }
         } else {
@@ -140,6 +143,12 @@ fn run_cloud_model_health_check(entry: CloudModelEntry) -> String {
         notes.push("embeddings not supported by the current Anthropic adapter".to_string());
     } else {
         notes.push("embeddings not supported by this lane".to_string());
+    }
+
+    if bookkeeper_ready {
+        notes.push("Bookkeeper ready".to_string());
+    } else {
+        notes.push("chat fine, Bookkeeper not ready".to_string());
     }
 
     format!(
