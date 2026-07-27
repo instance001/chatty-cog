@@ -20,6 +20,49 @@ That peer-to-peer mode is only for chatty-cog-to-chatty-cog connections. It is i
 
 This repo currently contains one Rust GUI app crate: `chattycog_gui`.
 
+## Architecture Map
+
+```mermaid
+flowchart TB
+    user["Operator<br/>local desktop user"] --> shell["ChattyCog GUI shell<br/>Chat, Models, Logs, Modules, Sandbox, Networking"]
+    shell --> orchestrator["Orchestrator chat<br/>main working assistant"]
+    shell --> modelPicker["Unified model selector<br/>local GGUF + BYO cloud entries"]
+
+    modelPicker --> localLane["Local GGUF lane<br/>llama.cpp runtime, Vulkan or CPU"]
+    modelPicker --> cloudLane["Optional cloud lane<br/>OpenAI-compatible, Anthropic, Gemini"]
+    localLane --> orchestrator
+    cloudLane --> orchestrator
+
+    shell --> bookkeeper["Bookkeeper<br/>memory, logging, search"]
+    bookkeeper --> hot["Hot Memory<br/>visible working set"]
+    bookkeeper --> luke["Luke Warm<br/>rolling summary"]
+    bookkeeper --> cold["Cold log<br/>append-only JSONL"]
+    bookkeeper --> departments["Department rundowns<br/>per-module summaries"]
+    hot --> orchestrator
+    luke --> orchestrator
+    departments --> orchestrator
+
+    shell --> sandbox["Chatty_Sandbox<br/>approved local file work"]
+    sandbox --> scratchpad["Scratchpad + task ledger<br/>durable working notes"]
+    scratchpad --> orchestrator
+
+    shell --> modules["Drop-in modules<br/>manifest-driven tabs"]
+    modules --> hosted["Hosted module UI<br/>native window or webview"]
+    modules --> bridge["ChattyCog bridge<br/>status, logs, assets, rundowns"]
+    bridge --> departments
+
+    shell --> peers["Optional LAN peers<br/>ChattyCog-to-ChattyCog only"]
+    peers --> bundles["Workflow bundles + handoff notes<br/>local, user-approved sharing"]
+
+    classDef userLayer fill:#eef7f2,stroke:#25624f,color:#14231d;
+    classDef hostLayer fill:#fff8ec,stroke:#9b5b2e,color:#2a1b10;
+    classDef memoryLayer fill:#f3f0ea,stroke:#777,color:#333;
+
+    class user,shell,orchestrator,modelPicker userLayer;
+    class localLane,cloudLane,sandbox,scratchpad,modules,hosted,bridge,peers,bundles hostLayer;
+    class bookkeeper,hot,luke,cold,departments memoryLayer;
+```
+
 ## Quickstart (Windows)
 
 1) Prereqs
@@ -109,6 +152,28 @@ cargo run --bin smoke_llama
 
 One of ChattyCog's strongest use cases is not just "open a module in a tab."
 It is using the orchestrator, sandbox, hosted module tabs, and handoff lanes together to build a compounding workflow loop without bouncing back out to the desktop.
+
+```mermaid
+flowchart LR
+    cog["ChattyCog<br/>orchestrator + sandbox + module host"] --> plan["Plan / brief<br/>goals, prompts, asset needs, mod notes"]
+    plan --> art["Chatty-art<br/>generate candidate images, GIFs, video, audio"]
+    art --> quest["Chatty Quest / other modules<br/>use media in scenarios, docs, packs, UI"]
+    art --> lora["Chatty-lora<br/>curate candidates into datasets<br/>train or prepare LoRAs"]
+    lora --> art
+    lora --> quest
+
+    quest --> feedback["Playtest / inspect / compare<br/>what worked, what failed, what is missing"]
+    feedback --> rundown["Module rundown + bridge status<br/>receipts back to ChattyCog"]
+    rundown --> cog
+
+    cog --> next["Next iteration<br/>refine prompt, dataset, asset request, or module plan"]
+    next --> art
+    next --> lora
+    next --> quest
+
+    sandbox["Chatty_Sandbox<br/>durable notes, templates, task ledgers"] -. supports .-> cog
+    cog -. writes/reads .-> sandbox
+```
 
 In practical terms, that means:
 
