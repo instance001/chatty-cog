@@ -220,8 +220,8 @@ fn default_chat_right_panel_width() -> f32 {
 }
 
 pub fn default_prefs_path() -> Result<PathBuf> {
-    let cwd = std::env::current_dir().context("current_dir")?;
-    Ok(cwd.join("config").join("preferences.json"))
+    let base = crate::app_paths::ensure_app_dirs()?;
+    Ok(base.join("config").join("preferences.json"))
 }
 
 pub fn load_prefs(path: &Path) -> Result<AppPreferences> {
@@ -259,7 +259,8 @@ pub fn load_prefs(path: &Path) -> Result<AppPreferences> {
         entry.model_name = entry.model_name.trim().to_string();
         entry.embedding_model_name = entry.embedding_model_name.trim().to_string();
         entry.last_health_status = entry.last_health_status.trim().to_string();
-        entry.last_verified_chat_model_name = entry.last_verified_chat_model_name.trim().to_string();
+        entry.last_verified_chat_model_name =
+            entry.last_verified_chat_model_name.trim().to_string();
         entry.last_verified_embedding_model_name =
             entry.last_verified_embedding_model_name.trim().to_string();
         if entry.display_name.is_empty() {

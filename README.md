@@ -67,9 +67,11 @@ flowchart TB
 
 1) Prereqs
 - Install Rust (stable).
-- Install LLVM (for bindgen / libclang). Default path assumed: `C:\Program Files\LLVM\bin`.
+- Install LLVM (for bindgen / libclang). The normal Windows installer path is `C:\Program Files\LLVM\bin`; if LLVM is elsewhere, set `LIBCLANG_PATH` to its `bin` folder.
 
 2) Folder layout
+ChattyCog creates its working folders on first run. In a source checkout, the active base is the repo root. In a packaged unzip-and-run release, the active base is the folder beside `chattycog_gui.exe`. Set `CHATTYCOG_BASE_PATH` to force a different portable or shared location.
+
 - `models/` - put your `.gguf` files here
 - `runtime/windows/` - put `llama.dll` + `ggml-*.dll` backends here (Vulkan + CPU)
 - `modules/` - drop-in modules (each module needs a `manifest.json`)

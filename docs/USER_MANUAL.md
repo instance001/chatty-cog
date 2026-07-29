@@ -46,11 +46,12 @@ The intended stance is user sovereignty:
 
 2) Install LLVM
 - Required for generating bindings (bindgen uses libclang).
-- Default install path expected: `C:\Program Files\LLVM\bin`
+- The normal Windows installer path is `C:\Program Files\LLVM\bin`.
+- If LLVM is somewhere else, set `LIBCLANG_PATH` to that LLVM `bin` folder.
 
 ## Folder layout (important)
 
-Inside the repo root:
+ChattyCog creates its working folders on first run. In a source checkout, these folders live in the repo root. In a packaged unzip-and-run folder, they live beside `chattycog_gui.exe`. Advanced users can set `CHATTYCOG_BASE_PATH` to force another portable or shared location.
 
 - `models/`
   - Put your `.gguf` model files here.

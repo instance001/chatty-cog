@@ -2,16 +2,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use chattycog_gui::app_paths::{find_models_dir, find_runtime_windows_dir};
 use chattycog_gui::llama_dyn::Llama;
 
 fn main() -> Result<()> {
-    let runtime_dir = find_upwards_with_child("runtime")
-        .context("locate runtime/")?
-        .join("runtime")
-        .join("windows");
-    let models_dir = find_upwards_with_child("models")
-        .context("locate models/")?
-        .join("models");
+    let runtime_dir = find_runtime_windows_dir().context("locate runtime/windows/")?;
+    let models_dir = find_models_dir().context("locate models/")?;
 
     let model = std::env::args()
         .nth(1)
@@ -40,29 +36,4 @@ fn main() -> Result<()> {
     // Ensure we didn't accidentally cancel
     cancel.store(false, Ordering::Relaxed);
     Ok(())
-}
-
-fn find_upwards_with_child(child: &str) -> Result<PathBuf> {
-    let mut starts = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            starts.push(dir.to_path_buf());
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
-    }
-
-    for start in starts {
-        let mut cur = Some(start.as_path());
-        while let Some(dir) = cur {
-            let candidate = dir.join(child);
-            if candidate.is_dir() {
-                return Ok(dir.to_path_buf());
-            }
-            cur = dir.parent();
-        }
-    }
-
-    anyhow::bail!("could not locate `{child}` by searching upwards from exe/cwd");
 }

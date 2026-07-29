@@ -2,20 +2,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+const APP_BASE_ENV: &str = "CHATTYCOG_BASE_PATH";
+
 pub fn find_models_dir() -> Option<PathBuf> {
-    find_upwards_with_child("models")
-        .ok()
-        .map(|root| root.join("models"))
+    ensure_app_dirs().ok().map(|root| root.join("models"))
 }
 
 pub fn find_modules_dir() -> Option<PathBuf> {
-    find_upwards_with_child("modules")
-        .ok()
-        .map(|root| root.join("modules"))
+    ensure_app_dirs().ok().map(|root| root.join("modules"))
 }
 
 pub fn find_runtime_windows_dir() -> Result<PathBuf> {
-    let root = find_upwards_with_child("runtime")?;
+    let root = ensure_app_dirs()?;
     let path = root.join("runtime").join("windows");
     if path.is_dir() {
         Ok(path)
@@ -25,46 +23,62 @@ pub fn find_runtime_windows_dir() -> Result<PathBuf> {
 }
 
 pub fn find_default_logs_dir() -> Option<PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let path = cwd.join("memory");
-        if path.is_dir() {
-            return Some(path);
-        }
-    }
-
-    if let Ok(root) = find_upwards_with_child("memory") {
-        let path = root.join("memory");
-        if path.is_dir() {
-            return Some(path);
-        }
-    }
-
-    find_upwards_with_child("chattycog_gui")
-        .ok()
-        .map(|root| root.join("chattycog_gui").join("memory"))
-        .filter(|path| path.is_dir())
+    ensure_app_dirs().ok().map(|root| root.join("memory"))
 }
 
 pub fn find_sandbox_dir() -> Option<PathBuf> {
-    find_upwards_with_child("Chatty_Sandbox")
+    ensure_app_dirs()
         .ok()
         .map(|root| root.join("Chatty_Sandbox"))
 }
 
 pub fn find_or_create_sandbox_dir() -> Option<PathBuf> {
-    if let Some(existing) = find_sandbox_dir() {
-        return Some(existing);
+    find_sandbox_dir()
+}
+
+pub fn app_base_dir() -> Result<PathBuf> {
+    if let Ok(value) = std::env::var(APP_BASE_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
     }
 
-    let root = find_upwards_with_child("chattycog_gui")
-        .ok()
-        .or_else(|| std::env::current_dir().ok())?;
-    let dir = root.join("Chatty_Sandbox");
-    if std::fs::create_dir_all(&dir).is_ok() {
-        Some(dir)
-    } else {
-        None
+    if let Ok(exe) = std::env::current_exe() {
+        for dir in exe.ancestors().filter(|path| path.is_dir()) {
+            if dir.join("Cargo.toml").is_file() && dir.join("src").is_dir() {
+                return Ok(dir.to_path_buf());
+            }
+        }
+
+        if let Some(dir) = exe.parent() {
+            return Ok(dir.to_path_buf());
+        }
     }
+
+    std::env::current_dir().context("current_dir")
+}
+
+pub fn ensure_app_dirs() -> Result<PathBuf> {
+    let base = app_base_dir()?;
+    let dirs = [
+        base.clone(),
+        base.join("models"),
+        base.join("runtime"),
+        base.join("runtime").join("windows"),
+        base.join("modules"),
+        base.join("memory"),
+        base.join("logs"),
+        base.join("config"),
+        base.join("Chatty_Sandbox"),
+        base.join("Chatty_Sandbox").join("scratchpad"),
+    ];
+
+    for dir in dirs {
+        std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    }
+
+    Ok(base)
 }
 
 pub fn read_lukewarm_from_logs_dir(logs_dir: Option<&Path>) -> Result<String> {
@@ -131,31 +145,6 @@ fn resolve_logs_dir(logs_dir: Option<&Path>) -> Option<PathBuf> {
     logs_dir
         .map(Path::to_path_buf)
         .or_else(find_default_logs_dir)
-}
-
-fn find_upwards_with_child(child: &str) -> Result<PathBuf> {
-    let mut starts = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            starts.push(dir.to_path_buf());
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
-    }
-
-    for start in starts {
-        let mut cur = Some(start.as_path());
-        while let Some(dir) = cur {
-            let candidate = dir.join(child);
-            if candidate.is_dir() {
-                return Ok(dir.to_path_buf());
-            }
-            cur = dir.parent();
-        }
-    }
-
-    anyhow::bail!("could not locate `{child}` by searching upwards from exe/cwd");
 }
 
 fn read_text_file(path: &Path, max_bytes: usize) -> Result<String> {

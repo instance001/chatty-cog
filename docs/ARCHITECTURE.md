@@ -156,12 +156,14 @@ These are the UI paths most likely to regress during layout or state refactors.
 
 ### Regression guardrail
 
-- Use [CHAT_UI_SMOKE_CHECKLIST.md](C:/Users/User/Desktop/github_portal/chatty-cog/docs/CHAT_UI_SMOKE_CHECKLIST.md) after changes to chat layout, composer behavior, Luke Warm rendering, or sandbox approval surfaces.
+- Use [CHAT_UI_SMOKE_CHECKLIST.md](CHAT_UI_SMOKE_CHECKLIST.md) after changes to chat layout, composer behavior, Luke Warm rendering, or sandbox approval surfaces.
 - Treat width drift, focus loss after a short pause, and idle Luke Warm polling stalls as first-class regressions, not cosmetic issues.
 
 ## Packaging direction
 
-The current repo layout keeps `models/`, `runtime/`, `memory/`, `modules/`, and `Chatty_Sandbox/` at the crate root so a future packaged app can still ship a single directory tree:
+The app resolves one active base path and creates the standard working folders on first run. During development that base is the source checkout root. In a packaged unzip-and-run release it is the folder beside `chattycog_gui.exe`. `CHATTYCOG_BASE_PATH` can override the base for portable/shared deployments.
+
+The repo layout keeps `models/`, `runtime/`, `memory/`, `modules/`, and `Chatty_Sandbox/` at the active base so a packaged app can still ship a single directory tree:
 
 ```
 chatty-cog/
@@ -172,3 +174,5 @@ chatty-cog/
   memory/*
   Chatty_Sandbox/*
 ```
+
+First-run startup creates the empty working folders when they are missing. Keep model files and runtime DLLs out of git and place them into the packaged release folder or a `CHATTYCOG_BASE_PATH` location.
