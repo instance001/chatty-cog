@@ -20,6 +20,16 @@ That peer-to-peer mode is only for chatty-cog-to-chatty-cog connections. It is i
 
 This repo currently contains one Rust GUI app crate: `chattycog_gui`.
 
+## Screenshots
+
+![ChattyCog main workspace](<./assets/Screenshot 2026-07-30 122131.png>)
+
+| Workspace views | Supporting panels |
+| --- | --- |
+| ![ChattyCog chat workspace](<./assets/Screenshot 2026-07-30 122141.png>) | ![ChattyCog model selection](<./assets/Screenshot 2026-07-30 122150.png>) |
+| ![ChattyCog module workspace](<./assets/Screenshot 2026-07-30 122158.png>) | ![ChattyCog logs view](<./assets/Screenshot 2026-07-30 122209.png>) |
+| ![ChattyCog sandbox view](<./assets/Screenshot 2026-07-30 122310.png>) |  |
+
 ## Architecture Map
 
 ```mermaid
