@@ -4,6 +4,30 @@ use anyhow::{Context, Result};
 
 const APP_BASE_ENV: &str = "CHATTYCOG_BASE_PATH";
 
+const APP_DIRS: &[&str] = &[
+    "models",
+    "runtime",
+    "runtime/windows",
+    "modules",
+    "memory",
+    "logs",
+    "config",
+    "Chatty_Sandbox",
+    "Chatty_Sandbox/scratchpad",
+    "network_inbox",
+    "network_inbox/workflow_states",
+    "network_inbox/workflow_bundles",
+    "network_inbox/lukewarm_context",
+    "network_inbox/applied_lukewarm_context",
+    "network_inbox/file_transfers",
+    "network_inbox/file_transfers/payloads",
+    "network_inbox/applied_file_transfers",
+    "network_recovery",
+    "network_recovery/module_session_payloads",
+    "network_trust_exports",
+    "network_trust_imports",
+];
+
 pub fn find_models_dir() -> Option<PathBuf> {
     ensure_app_dirs().ok().map(|root| root.join("models"))
 }
@@ -61,20 +85,10 @@ pub fn app_base_dir() -> Result<PathBuf> {
 
 pub fn ensure_app_dirs() -> Result<PathBuf> {
     let base = app_base_dir()?;
-    let dirs = [
-        base.clone(),
-        base.join("models"),
-        base.join("runtime"),
-        base.join("runtime").join("windows"),
-        base.join("modules"),
-        base.join("memory"),
-        base.join("logs"),
-        base.join("config"),
-        base.join("Chatty_Sandbox"),
-        base.join("Chatty_Sandbox").join("scratchpad"),
-    ];
+    std::fs::create_dir_all(&base).with_context(|| format!("mkdir {}", base.display()))?;
 
-    for dir in dirs {
+    for rel in APP_DIRS {
+        let dir = base.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
     }
 
@@ -311,4 +325,59 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.key, previous);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_app_dirs_bootstraps_binary_first_run_layout() {
+        let base =
+            std::env::temp_dir().join(format!("chattycog-first-run-test-{}", std::process::id()));
+        if base.exists() {
+            std::fs::remove_dir_all(&base).unwrap();
+        }
+
+        let _guard = EnvGuard::set(APP_BASE_ENV, &base);
+        let root = ensure_app_dirs().unwrap();
+
+        assert_eq!(root, base);
+        for rel in APP_DIRS {
+            assert!(
+                base.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+                    .is_dir(),
+                "missing first-run directory: {rel}"
+            );
+        }
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }
