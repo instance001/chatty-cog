@@ -14,6 +14,9 @@ use crate::llama_dyn::Llama;
 pub struct BookkeeperConfig {
     pub lukewarm_token_window: usize,
     pub lukewarm_max_tokens: usize,
+    pub temp: f32,
+    pub top_p: f32,
+    pub top_k: i32,
 }
 
 impl Default for BookkeeperConfig {
@@ -21,6 +24,9 @@ impl Default for BookkeeperConfig {
         Self {
             lukewarm_token_window: 1500,
             lukewarm_max_tokens: 160,
+            temp: 0.2,
+            top_p: 0.9,
+            top_k: 40,
         }
     }
 }
@@ -585,8 +591,8 @@ fn sanitize_lukewarm_output(raw: &str) -> String {
         para_parts.join(" ")
     };
 
-    let bullet = clamp_chars(bullet.trim(), 180);
-    let para = clamp_chars(para.trim(), 320);
+    let bullet = clamp_chars(bullet.trim(), 260);
+    let para = clamp_chars(para.trim(), 900);
     format!("{bullet}\n{para}")
 }
 
@@ -875,9 +881,9 @@ impl LukeWarm {
             model_path,
             &prompt,
             self.cfg.lukewarm_max_tokens,
-            0.2,
-            0.9,
-            40,
+            self.cfg.temp,
+            self.cfg.top_p,
+            self.cfg.top_k,
             cancel,
             |t| out.push_str(t),
         );
@@ -885,6 +891,7 @@ impl LukeWarm {
         if !out.is_empty() {
             self.summary = out;
             self.last_summary_at = Some(now);
+            self.prune_buffer_after_success();
             let _ = std::fs::write(&self.summary_path, &self.summary);
         }
     }
@@ -933,15 +940,26 @@ impl LukeWarm {
             system,
             &prompt,
             self.cfg.lukewarm_max_tokens,
-            0.2,
-            0.9,
+            self.cfg.temp,
+            self.cfg.top_p,
         ) {
             let out = sanitize_lukewarm_output(out.trim());
             if !out.is_empty() {
                 self.summary = out;
                 self.last_summary_at = Some(now);
+                self.prune_buffer_after_success();
                 let _ = std::fs::write(&self.summary_path, &self.summary);
             }
+        }
+    }
+
+    fn prune_buffer_after_success(&mut self) {
+        let target = (self.cfg.lukewarm_token_window / 3).max(200);
+        while self.token_est > target && !self.buf.is_empty() {
+            let removed = self.buf.remove(0);
+            self.token_est = self
+                .token_est
+                .saturating_sub((removed.len().max(1) + 3) / 4);
         }
     }
 }
@@ -1237,4 +1255,56 @@ fn unescape_json(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lukewarm_sanitizer_keeps_useful_body_text() {
+        let body = "The assistant and user inspected the bookkeeper rolling summary path. "
+            .repeat(8);
+        let raw = format!(
+            "- Bookkeeper rolling summary update investigated.\n{body}Next action is to keep the summary fresh without repeatedly reprocessing the same full buffer."
+        );
+
+        let sanitized = sanitize_lukewarm_output(&raw);
+
+        assert!(sanitized.contains("Bookkeeper rolling summary update investigated"));
+        assert!(sanitized.contains("Next action"));
+        assert!(
+            sanitized.chars().count() > 500,
+            "summary was unexpectedly over-truncated: {sanitized}"
+        );
+    }
+
+    #[test]
+    fn successful_lukewarm_update_prunes_raw_buffer() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "chattycog-lukewarm-prune-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&data_dir);
+
+        let mut lukewarm = LukeWarm::new(
+            BookkeeperConfig {
+                lukewarm_token_window: 900,
+                ..BookkeeperConfig::default()
+            },
+            &data_dir,
+        );
+        for i in 0..12 {
+            let line = format!("event {i}: {}", "recent work item ".repeat(16));
+            lukewarm.token_est += (line.len().max(1) + 3) / 4;
+            lukewarm.buf.push(line);
+        }
+        assert!(lukewarm.token_est > 300);
+
+        lukewarm.prune_buffer_after_success();
+
+        assert!(lukewarm.token_est <= 300);
+        assert!(!lukewarm.buf.is_empty());
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 }

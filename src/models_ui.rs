@@ -473,30 +473,30 @@ fn render_models_bookkeeper_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             "Cloud bookkeeper entries should also include an embeddings model name so semantic search can keep working.",
         );
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui.button("Copy from current").clicked() {
-                app.prefs.bookkeeper.temp = app.bookkeeper_temp;
-                app.prefs.bookkeeper.top_p = app.bookkeeper_top_p;
-                app.prefs.bookkeeper.top_k = app.bookkeeper_top_k;
-                app.prefs.bookkeeper.max_tokens = app.bookkeeper_max_tokens;
-                app.prefs_status = "Copied bookkeeper settings.".to_string();
-            }
-            if ui.button("Apply to current").clicked() {
-                app.bookkeeper_temp = app.prefs.bookkeeper.temp;
-                app.bookkeeper_top_p = app.prefs.bookkeeper.top_p;
-                app.bookkeeper_top_k = app.prefs.bookkeeper.top_k;
-                app.bookkeeper_max_tokens = app.prefs.bookkeeper.max_tokens;
-                app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(200));
-                app.prefs_status = "Applied bookkeeper settings (restart pending).".to_string();
-            }
-        });
-        add_presets_prefs_bookkeeper(ui, &mut app.prefs.bookkeeper);
-        ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.temp, 0.0..=2.0).text("temp"));
-        ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.top_p, 0.0..=1.0).text("top_p"));
-        ui.add(egui::Slider::new(&mut app.prefs.bookkeeper.top_k, 0..=200).text("top_k"));
-        ui.add(
-            egui::Slider::new(&mut app.prefs.bookkeeper.max_tokens, 1..=4096).text("max_tokens"),
-        );
+        add_presets_bookkeeper(ui, app);
+        let mut changed = false;
+        changed |= ui
+            .add(egui::Slider::new(&mut app.bookkeeper_temp, 0.0..=2.0).text("temp"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut app.bookkeeper_top_p, 0.0..=1.0).text("top_p"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut app.bookkeeper_top_k, 0..=200).text("top_k"))
+            .changed();
+        changed |= ui
+            .add(egui::Slider::new(&mut app.bookkeeper_max_tokens, 1..=4096).text("max_tokens"))
+            .changed();
+        if changed {
+            app.prefs.bookkeeper = GenParams {
+                temp: app.bookkeeper_temp,
+                top_p: app.bookkeeper_top_p,
+                top_k: app.bookkeeper_top_k,
+                max_tokens: app.bookkeeper_max_tokens,
+            };
+            app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
+            app.prefs_status = "Updated bookkeeper settings (restart pending).".to_string();
+        }
     });
 }
 

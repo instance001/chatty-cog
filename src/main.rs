@@ -9328,6 +9328,12 @@ impl eframe::App for ChattyCogApp {
                     self.models_dir.clone(),
                     self.modules_dir.clone(),
                     self.prefs.cloud_models.clone(),
+                    GenParams {
+                        temp: self.bookkeeper_temp,
+                        top_p: self.bookkeeper_top_p,
+                        top_k: self.bookkeeper_top_k,
+                        max_tokens: self.bookkeeper_max_tokens,
+                    },
                 );
             } else {
                 ctx.request_repaint_after(Duration::from_millis(33));
@@ -10725,26 +10731,38 @@ fn truncate_for_ui(s: &str, max_chars: usize) -> String {
 }
 
 fn add_presets_bookkeeper(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
+    let mut changed = false;
     ui.horizontal(|ui| {
         if ui.button("Precise").clicked() {
             app.bookkeeper_temp = 0.0;
             app.bookkeeper_top_p = 1.0;
             app.bookkeeper_top_k = 1;
+            changed = true;
             app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
         }
         if ui.button("Balanced").clicked() {
             app.bookkeeper_temp = 0.2;
             app.bookkeeper_top_p = 0.9;
             app.bookkeeper_top_k = 40;
+            changed = true;
             app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
         }
         if ui.button("Creative").clicked() {
             app.bookkeeper_temp = 0.7;
             app.bookkeeper_top_p = 0.95;
             app.bookkeeper_top_k = 80;
+            changed = true;
             app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
         }
     });
+    if changed {
+        app.prefs.bookkeeper = GenParams {
+            temp: app.bookkeeper_temp,
+            top_p: app.bookkeeper_top_p,
+            top_k: app.bookkeeper_top_k,
+            max_tokens: app.bookkeeper_max_tokens,
+        };
+    }
 }
 
 fn add_presets_prefs_orchestrator(ui: &mut egui::Ui, p: &mut GenParams) {
@@ -10793,12 +10811,19 @@ fn start_bookkeeper(
     models_dir: Option<PathBuf>,
     modules_dir: Option<PathBuf>,
     cloud_models: Vec<CloudModelEntry>,
+    params: GenParams,
 ) -> Option<BookkeeperHandle> {
     let data_dir = logs_dir
         .or_else(find_default_logs_dir)
         .unwrap_or_else(|| PathBuf::from("memory"));
 
-    let cfg = BookkeeperConfig::default();
+    let cfg = BookkeeperConfig {
+        lukewarm_max_tokens: params.max_tokens.max(1) as usize,
+        temp: params.temp,
+        top_p: params.top_p,
+        top_k: params.top_k,
+        ..BookkeeperConfig::default()
+    };
     let target = resolve_model_selection_for_dirs(
         models_dir.as_deref(),
         modules_dir.as_deref(),

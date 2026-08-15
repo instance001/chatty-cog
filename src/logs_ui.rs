@@ -99,6 +99,12 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         .add(egui::Slider::new(&mut app.bookkeeper_max_tokens, 1..=4096).text("max_tokens"))
         .changed();
     if changed {
+        app.prefs.bookkeeper = GenParams {
+            temp: app.bookkeeper_temp,
+            top_p: app.bookkeeper_top_p,
+            top_k: app.bookkeeper_top_k,
+            max_tokens: app.bookkeeper_max_tokens,
+        };
         app.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(600));
     }
 
@@ -113,6 +119,12 @@ pub(super) fn left_sidebar_logs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 app.models_dir.clone(),
                 app.modules_dir.clone(),
                 app.prefs.cloud_models.clone(),
+                GenParams {
+                    temp: app.bookkeeper_temp,
+                    top_p: app.bookkeeper_top_p,
+                    top_k: app.bookkeeper_top_k,
+                    max_tokens: app.bookkeeper_max_tokens,
+                },
             );
         }
         if ui.button("Stop").clicked() {

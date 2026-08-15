@@ -278,9 +278,9 @@ fn sanitize_lukewarm_summary_for_ui(raw: &str) -> String {
         return String::new();
     }
 
-    let headline = format!("- {}", truncate_chars(&lines[0], 160));
+    let headline = format!("- {}", truncate_chars(&lines[0], 260));
     let body = if lines.len() > 1 {
-        truncate_chars(&lines[1..].join(" "), 320)
+        truncate_chars(&lines[1..].join(" "), 900)
     } else {
         String::new()
     };
@@ -356,6 +356,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_keeps_long_body_context() {
+        let body =
+            "The rolling summary should stay readable across repeated bookkeeper updates. "
+                .repeat(8);
+        let raw = format!("- Summary refreshed.\n{body}Next action remains visible.");
+
+        let sanitized = sanitize_lukewarm_summary_for_ui(&raw);
+
+        assert!(sanitized.contains("Summary refreshed"));
+        assert!(sanitized.contains("Next action remains visible"));
+        assert!(
+            sanitized.chars().count() > 500,
+            "UI sanitizer over-truncated the rolling summary: {sanitized}"
+        );
     }
 
     #[test]
