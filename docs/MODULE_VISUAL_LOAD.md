@@ -242,7 +242,7 @@ Your normal module handshake still lives in:
 
 Those files still govern:
 - identity
-- suspend rundown / department context
+- suspend rundown / module context
 - structured state surfaces
 - cross-module coordination
 

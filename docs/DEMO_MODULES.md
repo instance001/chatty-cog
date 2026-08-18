@@ -1,8 +1,8 @@
 # Demo Modules (Onboarding Flow)
 
 ChattyCog ships with a few stand-alone demo modules that are intentionally related, so you can see cross-module coordination through:
-- Department Status Updates (`memory/departments.md`)
-- Luke Warm (`memory/lukewarm.txt`)
+- Module status updates (`memory/departments.md`, compatibility filename)
+- Luke Warm rolling summary (`memory/lukewarm.txt`)
 
 Demo modules:
 - `Work Schedule (Demo)` (`demo_work_schedule`)
@@ -12,10 +12,10 @@ Demo modules:
 They demonstrate:
 - Module discovery + dynamic tabs (opened from the Modules menu)
 - Module workspace surfaces (`ui.json` form or `workspace.md` editor)
-- Hosted module UIs via `visual_load.json` (all three demo departments now ship as bundled webview examples)
+- Hosted module UIs via `visual_load.json` (all three demo modules now ship as bundled webview examples)
 - A real room-aware/multiplayer hosted module (`Work Schedule`) that reacts to shared-room sessions, host-led mirroring, and talking-stick control
 - A living incoming-asset lane example (`Work Schedule`), where approved assets landing in `lesson_assets` can be previewed, imported into the planner, and marked consumed from inside the hosted module UI
-- Automatic "on suspend" rundown -> cold log -> Department Status Updates
+- Automatic "on suspend" rundown -> cold log -> module status updates
 - Orchestrator reading `departments.md` + `lukewarm.txt` for cross-module coordination
 - (For the AI demo) module-owned generation UI using the local runtime
 
@@ -26,7 +26,7 @@ They ship in:
 
 Each module includes:
 - `manifest.json` (required for discovery)
-- `HANDSHAKE.md` (how to use the department)
+- `HANDSHAKE.md` (how to use the module)
 - `STATE_TEMPLATE.md` (optional fallback template for `workspace.md`)
 - `ui.json` (recommended) + `state.json` output after you save
 

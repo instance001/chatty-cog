@@ -359,14 +359,14 @@ If `ai_enabled: true`, the module tab also shows a minimal, local AI runner:
 
 This uses the same local llama.cpp runtime as the Chat tab.
 
-## Orchestrator "Debrief" (department + lukewarm injection)
+## Orchestrator "Debrief" (module status + rolling-summary injection)
 
 Before each orchestrator generation, ChattyCog reads:
 - `memory/departments.md` (latest per-module rundowns)
 - `memory/lukewarm.txt` (rolling recent activity summary)
 
 and injects them into the system prompt under:
-- `### DEPARTMENT STATUS UPDATES`
+- `### MODULE STATUS UPDATES`
 - `### RECENT ACTIVITY (LUKE WARM)`
 
 ## Cold Log Envelope (schemaless standard)
@@ -376,7 +376,7 @@ ChattyCog stores long-term memory in `memory/cold_log.jsonl`.
 Recommended convention for module events:
 
 Required intent fields:
-- `module_id`: department/module identifier (use your manifest's `module_id`)
+- `module_id`: module identifier (use your manifest's `module_id`; older docs may call this department)
 - `event_type`: what happened (short, stable string)
 - `summary`: short human text (1 paragraph max)
 

@@ -20,11 +20,11 @@ In practice, ChattyCog now treats "model selection" as a shared routing problem 
   - Unified chat-header model selector with live model switching across local GGUF and BYO cloud entries, plus quick-open, refresh, voice status, and live chat token readout
   - Collapsible assistant reasoning view in each assistant bubble plus inline interrupt control in the chat composer
   - Wait-state guard in the composer so extra user turns cannot be injected while inference is already running
-  - Three-column chat layout with anchored Hot Memory and Luke Warm side panels around the transcript
+  - Three-column chat layout with anchored Hot Memory / active context and Luke Warm / rolling summary side panels around the transcript
   - Transcript and assistant thinking views are width-clamped to the center panel to prevent long-session horizontal creep
   - Heuristic cleanup for leaked / repeated reasoning so obvious draft loops get siphoned out of visible replies and duplicate streamed suffixes are trimmed
-  - Capsule library for reusable personality / behavior injections, stored in preferences and optionally layered into the orchestrator system prompt
-  - Hot memory panel (user-visible recent/pinned items)
+  - Capsule library product surface for reusable behaviour/style profiles, stored in preferences and optionally layered into the orchestrator system prompt
+  - Hot Memory panel for active context (user-visible recent/pinned items)
   - Logs UI (semantic search + keyword search + log folder explorer)
   - Sandbox explorer/editor (`Chatty_Sandbox/`)
   - Orchestrator sandbox tool requests (user-approved write/append/read/list/preload/ledger within `Chatty_Sandbox/`)
@@ -79,11 +79,11 @@ In practice, ChattyCog now treats "model selection" as a shared routing problem 
     - CPU-only generation (`generate_text_cpu_only`)
     - CPU-only embeddings (`embed_text_cpu_only`)
 
-### Memory / Bookkeeper (CPU-only)
+### Memory / Bookkeeper Support Role
 
 - `src/memory/bookkeeper.rs`
   - Runs in its own thread
-  - Records "cold" events to `memory/cold_log.jsonl`
+  - Records audit-history events to `memory/cold_log.jsonl`
   - can run on either:
     - local llama.cpp lane
     - BYO cloud lane with chat + embeddings endpoints
@@ -91,10 +91,25 @@ In practice, ChattyCog now treats "model selection" as a shared routing problem 
     - semantic search (cosine similarity, brute-force over stored vectors)
     - optional filters by `module_id` and/or `tag`
     - keyword fallback handled in GUI
-    - "Luke Warm" rolling summary stored in `memory/lukewarm.txt`
-    - "Department Status Updates" stored in:
+    - `Luke Warm` rolling summary stored in `memory/lukewarm.txt`
+    - module status updates stored in compatibility files:
       - `memory/departments.md` (human / orchestrator injection)
       - `memory/departments.json` (machine-readable)
+- `src/memory/governor.rs`
+  - host-owned cold-memory retrieval layer beside the existing Bookkeeper logs
+  - current first slice powers the user-triggered Remember path
+  - reads `memory/cold_log.jsonl` as exact historical evidence without rewriting it
+  - limits v1 retrieval to pure user/assistant interaction events
+  - extracts the matched exchange plus one complete exchange before and after where available
+  - preserves source path, event indexes, timestamp metadata, and the exact bounded transcript block
+  - renders selected cold context under a host-owned boundary that says it is historical evidence, not current truth
+  - does not promote selected material into active context, rolling summary, module status updates, or durable memory
+- `src/memory/semantic_index.rs`
+  - inert first-pass data model for a future meaning-sorted cold retrieval lane
+  - defines semantic buckets, evidence refs, bucket placements, sift proposals, and sift receipts
+  - mirrors the semantic-sorter shape: positive buckets plus exactly one required misc bucket for weak or non-fitting evidence
+  - stores references and metadata over cold evidence rather than replacement transcript text
+  - keeps bucket placement and bucket sifting reviewable before any future mutation path exists
 
 ## Cold log envelope (schemaless)
 
@@ -104,7 +119,7 @@ Required intent fields (current usage):
 - `ts` (unix ms)
 - `cat` (`chat` | `module`)
 - `source` (e.g. `user`, `assistant`, `ui`, `module`)
-- `module_id` (department / module name, empty for pure chat)
+- `module_id` (module name; historically described as department, empty for pure chat)
 - `event_type`
 - `summary` (short human text)
 
@@ -117,20 +132,35 @@ Note: the JSONL writer currently includes some duplicate keys for backwards-comp
 
 ## Memory tiers (intended)
 
-- Hot memory (orchestrator UI): small, user-visible list of pinned/recent items.
-- Department status updates (bookkeeper): latest per-module debriefs (for cross-module context).
-- Luke Warm (bookkeeper): rolling summary to keep context usable without bloating prompts.
-- Cold logs: full append-only record for later retrieval.
+- Active context (`Hot Memory` UI label): small, user-visible list of pinned/recent items.
+- Module status updates (`departments.*` compatibility files): latest per-module debriefs for cross-module context.
+- Rolling summary (`Luke Warm` UI label): summary to keep context usable without bloating prompts.
+- Audit history / event log (`cold_log.jsonl`): full append-only record for later retrieval.
+- Remember (host/governor): deliberate user-triggered recall from cold logs. Search proposes bounded historical candidates; the user selects; the host injects only selected exact transcript blocks into the next Main AI turn.
+- Cold semantic index (planned): meaning-sorted buckets over exact evidence refs. The index should reduce retrieval cost, then hydrate exact surrounding context from the linear cold log before user selection.
+
+Working doctrine:
+
+```text
+Active context keeps selected details close.
+Rolling summary orients the current thread.
+Cold semantic index remembers the shape.
+Audit history remembers the specifics.
+Remember is deliberate recall, not automatic belief.
+```
 
 ## Orchestrator system prompt injection
 
 Before each generation, the Chat tab reads:
-- `memory/departments.md` (latest per-module "what happened" updates)
-- `memory/lukewarm.txt` (recent activity rollup)
+- `memory/departments.md` (compatibility filename for latest per-module "what happened" updates)
+- `memory/lukewarm.txt` (rolling summary / recent activity rollup)
+- optional user-selected Remember attachments for the next send only
 
 and injects them into the orchestrator system prompt.
 
-If the user has activated a capsule from Preferences, that capsule is also layered into the orchestrator system prompt as an explicit style/persona overlay.
+If the user has activated a behaviour profile from the Capsule library product surface, that profile is also layered into the orchestrator system prompt as an explicit style/behaviour overlay.
+
+Remember attachments are injected under `USER-SELECTED COLD LOG CONTEXT`. They are cleared immediately after prompt construction so cold-log evidence does not remain silently active across turns.
 
 ## Known fragile surfaces
 

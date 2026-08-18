@@ -36,7 +36,7 @@ into:
 This UI system is:
 - A **declarative module surface** (section cards, text fields, checkboxes, number sliders, dropdowns, callouts, stats, and built-in action/file panels).
 - A way for users to keep structured notes/state for a module.
-- A way to create consistent "department state" that can be summarized into a "what happened" debrief.
+- A way to create consistent module state that can be summarized into a "what happened" debrief.
 
 This UI system is not:
 - A full "code plugin" system (ChattyCog does not execute module code from `ui.json`).
@@ -325,7 +325,7 @@ Each field supports:
 - Use `filter_presets` for the 2-5 views people will keep revisiting; ChattyCog automatically adds an `All` button alongside them.
 - Keep `id` values stable once users start using the module (changing IDs "loses" old saved values).
 - Use short, human labels. Put details in `description`, `help`, or placeholders.
-- Use `choice` for standard categories (budget level, difficulty, department, status, etc.).
+- Use `choice` for standard categories (budget level, difficulty, module area, status, etc.).
 - Use `number` with `min`/`max` when you want a slider instead of free typing.
 - Don't put secrets into `state.json` (it's plain text on disk).
 
@@ -340,7 +340,7 @@ To make a module tab feel purpose-built:
 - use `accordion` when the module has multiple deep panels but only a few should be expanded at a time
 - use `inspector` in sidebars for compact, collapsible status and artifact panels
 - use `view_presets` on nested layouts when different roles need different workspace lenses without duplicating sections
-- use `callout`, `markdown`, `stat`, `record`, `checklist`, `timeline`, `kanban`, `table`, `progress`, `bar_chart`, `dependency_graph`, `actions`, `artifact_preview`, and `file_list` blocks to make the module feel like a real department surface
+- use `callout`, `markdown`, `stat`, `record`, `checklist`, `timeline`, `kanban`, `table`, `progress`, `bar_chart`, `dependency_graph`, `actions`, `artifact_preview`, and `file_list` blocks to make the module feel like a real work surface
 - use `filter_placeholder` when a block needs a more specific hint like "Find ticket, lane, or owner..."
 - use short preset labels like `Blocked`, `Review`, `Done`, `Exports`, or `Eval`
 - add `help` text only where it genuinely unblocks a first-time user

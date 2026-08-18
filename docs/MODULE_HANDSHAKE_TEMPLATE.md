@@ -3,7 +3,7 @@
 Copy this file into your module folder (recommended name: `HANDSHAKE.md`) and fill it out.
 
 Purpose:
-- Give ChattyCog (and future module runners) a consistent "how to talk to this department" document.
+- Give ChattyCog (and future module runners) a consistent "how to talk to this module" document.
 - Provide the human-friendly suspend rundown format you want used for cross-module context.
 - Pair with the optional portable bridge if your module keeps its own standalone UI/state.
 
@@ -18,10 +18,10 @@ Important boundary:
 
 ## What this module is for (required)
 
-Describe the department's purpose in 1-3 sentences.
+Describe the module's purpose in 1-3 sentences.
 
 Example:
-- "This department handles math + proofs + derivations. It prefers rigorous, step-by-step reasoning and explicit assumptions."
+- "This module handles math, proofs, and derivations. It prefers rigorous, step-by-step reasoning and explicit assumptions."
 
 ## Inputs this module expects (required)
 
@@ -91,5 +91,5 @@ See:
 - `docs/MODULE_BRIDGE_SNIPPETS.md`
 
 Rule of thumb:
-- `HANDSHAKE.md` explains the department to humans
+- `HANDSHAKE.md` explains the module to humans
 - `bridge/status.json` reports the current handoff state to ChattyCog

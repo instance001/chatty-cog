@@ -1,6 +1,6 @@
 {
   "title": "Your Module Name",
-  "description": "One sentence: what this department/module does and what the user should do here.",
+  "description": "One sentence: what this module does and what the user should do here.",
   "sections": [
     {
       "id": "overview",
@@ -184,7 +184,7 @@
       "label": "Status",
       "kind": "choice",
       "options": ["not started", "in progress", "blocked", "done"],
-      "help": "Pick the option that best matches where this department is up to.",
+      "help": "Pick the option that best matches where this module is up to.",
       "section": "overview"
     },
     {

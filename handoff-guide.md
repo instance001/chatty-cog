@@ -5,7 +5,7 @@ This document defines the intended shape of the ChattyCog handoff system.
 It exists to keep the ecosystem modular:
 
 - ChattyCog is the meeting room, whiteboard, orchestrator, and shared review space.
-- Modules are the departments, work areas, or lab wings where the actual domain work happens.
+- Modules are the work areas or lab wings where the actual domain work happens.
 - The plug / bridge system is the operator wire: it carries signals, summaries, and approved file transfers.
 
 The goal is to let modules collaborate without collapsing into one giant shared runtime or one tangled state model.
@@ -36,7 +36,7 @@ The bridge should:
 
 ## Design rule
 
-Loose departments, strict handoff contracts.
+Loose modules, strict handoff contracts.
 
 This means:
 
@@ -200,7 +200,7 @@ Examples:
 
 ### Chatty-art
 
-Chatty-art is the media-generation department.
+Chatty-art is the media-generation module.
 
 Likely handoff surfaces:
 
@@ -220,7 +220,7 @@ Examples:
 
 ### Chatty-lora
 
-Chatty-lora is the dataset/training/LoRA-building department.
+Chatty-lora is the dataset/training/LoRA-building module.
 
 Likely handoff surfaces:
 
@@ -340,7 +340,7 @@ The first intended handoff paths are:
 ## Short summary
 
 ChattyCog is the room.
-Modules are the departments.
+Modules are the work areas.
 The bridge is the wire.
 Handoffs are explicit, mediated, copy-only, metadata-rich, and user-confirmed.
 

@@ -18,7 +18,7 @@ chatty-cog lets you keep local GGUF workflows as the base case while also adding
 - It uses a local runtime based on llama.cpp for GGUF models.
 - It can also list optional BYO cloud models beside local ones in the same selectors.
 - It includes a Bookkeeper that stores logs and helps you search them later.
-- It supports modules ("departments") via a simple drop-in folder system.
+- It supports modules via a simple drop-in folder system; older filenames and some labels may still use "department" for compatibility.
 - It can optionally connect to other nearby chatty-cog instances over local Wi-Fi or LAN.
 - That optional peer networking is only for chatty-cog-to-chatty-cog connections, not chatty-edu.
 
@@ -34,10 +34,10 @@ The intended stance is user sovereignty:
 - **Runtime**: the local engine that can run GGUF models (`llama.dll` and `ggml-*.dll`).
 - **Orchestrator**: the main Chat tab (the "pilot").
 - **Bookkeeper**: the memory/logging helper (Logs tab). It can now run on a local or cloud lane depending on what you select.
-- **Hot / Luke Warm / Cold memory**:
-  - Hot: small, recent/pinned sidebar items in Chat
-  - Luke Warm: a rolling summary of recent activity (`lukewarm.txt`)
-  - Cold: the long-term log (`cold_log.jsonl`)
+- **Active / rolling / audit context**:
+  - Hot Memory: active context, shown as small recent/pinned sidebar items in Chat
+  - Luke Warm: rolling summary of recent activity (`lukewarm.txt`)
+  - Cold log: audit history / event log (`cold_log.jsonl`)
 
 ## Install prerequisites
 
@@ -59,9 +59,9 @@ ChattyCog creates its working folders on first run. In a source checkout, these 
   - Put `llama.dll`, `ggml.dll`, and the backend DLLs here.
   - If you want Vulkan acceleration, include `ggml-vulkan.dll`.
 - `memory/`
-  - `cold_log.jsonl`: long-term logs (grows over time)
+  - `cold_log.jsonl`: audit history / long-term event log (grows over time)
   - `lukewarm.txt`: rolling summary
-  - `departments.md` / `departments.json`: latest per-module debriefs ("what happened in this module")
+  - `departments.md` / `departments.json`: compatibility filenames for latest per-module debriefs ("what happened in this module")
 - `modules/`
   - Drop-in modules (each needs a `manifest.json`).
 - `module_templates/`
@@ -163,10 +163,10 @@ cargo run --bin chattycog_gui
 - If you want to use a cloud model for the Bookkeeper too, give it an embeddings model name so semantic search can still work.
 - `Use provider default` will refill the base URL field for the currently selected provider family.
 
-6) Optional voice / personality capsules
+6) Optional voice / behaviour profiles
 - Open the `Models` tab and use the `Capsule Library` on the right.
 - You can:
-  - save a named personality / behavior capsule
+  - save a named behaviour/style profile
   - activate it for the current chat style
   - deactivate it and return to native ChattyCog voice
 - The top of the Chat tab shows the active voice state:
@@ -233,7 +233,7 @@ Tips for using this in plain language:
   - AI-requested sandbox file actions are limited to `.txt`, `.md`, and `.markdown`
   - approved sandbox actions now reopen the touched file and focus the Sandbox tab automatically
 
-### Modules (departments)
+### Modules
 
 Open modules from the top menu:
 - **Modules -> Open: <display_name>**
@@ -307,7 +307,7 @@ If **Models -> Auto-generate module suspend rundown on tab leave (Bookkeeper)** 
 - The latest per-module rundowns are written to:
   - `memory/departments.md`
   - `memory/departments.json`
-- The Chat tab injects `departments.md` into the orchestrator system prompt as "Department Status Updates".
+- The Chat tab injects `departments.md` into the orchestrator system prompt as module status updates. The filename and some UI copy may still use the older "department" wording for compatibility.
 
 Note: this is asynchronous, so it can take a few seconds. If you switch back to Chat and ask a cross-module question immediately, wait a moment and try again.
 
@@ -368,7 +368,7 @@ The Models tab stores and applies defaults across ChattyCog and modules.
   - Default generation params
   - Allow receiving Luke Warm context (reserved for future module runners)
 - Capsule library:
-  - saved named personality / behavior injections
+  - saved named behaviour/style injections
   - active capsule selection
   - editor for creating, updating, or deleting capsules
 
@@ -473,12 +473,12 @@ Plain-language version:
 The Logs tab contains the Bookkeeper and your on-disk logs.
 
 - Luke Warm summary shows in the left sidebar.
-- Bookkeeper (CPU):
+- Bookkeeper:
   - Select a small model for embeddings/summarization.
   - It auto-restarts after changes (debounced).
 - Search:
   - Semantic search: asks the Bookkeeper to retrieve similar items
-    - Optional filters: `module_id` (department) and/or `tag`
+    - Optional filters: `module_id` (module identifier, historically department) and/or `tag`
   - Keyword search: searches `cold_log.jsonl` directly
 - New cold-log event (schemaless):
   - You can append a "module event" directly from the Logs tab by filling:
@@ -502,9 +502,9 @@ Use this to inspect, draft, and maintain durable working notes locally.
   - `Seed from current context`
 - Editor pane:
   - shows a read-only `Task Ledger Snapshot` above the editor so you can keep the current task, next step, open questions, and files touched visible while you work
-  - editor toolbar includes `Append summary to hot memory` for quickly surfacing the current editor buffer back into the chat-side working memory
+  - editor toolbar includes `Append summary to hot memory` for quickly surfacing the current editor buffer back into the chat-side active context
   - editor toolbar includes `Use as current task` and `Use as next step` for quickly promoting working text into the ledger's main structured fields
-  - editor toolbar includes `Promote to scratchpad` and `Promote to ledger notes` so useful draft text can be moved into durable memory without manual copy/paste
+  - editor toolbar includes `Promote to scratchpad` and `Promote to ledger notes` so useful draft text can be moved into durable working notes without manual copy/paste
 - Multi-step prompts can trigger a small task hint in the Chat tab, nudging ChattyCog toward preload + ledger use when the job looks complex enough to benefit from structured tracking.
 - Left pane: recursive file list from `Chatty_Sandbox/`
 - Right pane: editor
@@ -561,7 +561,7 @@ Checklist:
 - Look at the Chat header and confirm `Chat max tokens` is not still low.
 - Open `Models -> Orchestrator (Chat)` and confirm `max_tokens` is where you expect it.
 - Save preferences if you want the higher value to persist into the next launch.
-- If the reply is extremely repetitive, interrupt it and retry after simplifying the active capsule or prompt.
+- If the reply is extremely repetitive, interrupt it and retry after simplifying the active behaviour profile or prompt.
 
 ### Module debriefs are not appearing in Chat
 

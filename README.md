@@ -44,10 +44,10 @@ flowchart TB
     cloudLane --> orchestrator
 
     shell --> bookkeeper["Bookkeeper<br/>memory, logging, search"]
-    bookkeeper --> hot["Hot Memory<br/>visible working set"]
-    bookkeeper --> luke["Luke Warm<br/>rolling summary"]
-    bookkeeper --> cold["Cold log<br/>append-only JSONL"]
-    bookkeeper --> departments["Department rundowns<br/>per-module summaries"]
+    bookkeeper --> hot["Hot Memory / active context<br/>visible working set"]
+    bookkeeper --> luke["Luke Warm / rolling summary<br/>recent activity rollup"]
+    bookkeeper --> cold["Cold log / audit history<br/>append-only JSONL"]
+    bookkeeper --> departments["Module status rundowns<br/>per-module summaries"]
     hot --> orchestrator
     luke --> orchestrator
     departments --> orchestrator
@@ -86,10 +86,10 @@ ChattyCog creates its working folders on first run. In a source checkout, the ac
 - `runtime/windows/` - put `llama.dll` + `ggml-*.dll` backends here (Vulkan + CPU)
 - `modules/` - drop-in modules (each module needs a `manifest.json`)
 - `Chatty_Sandbox/` - scratch folder the app can browse/edit (and the orchestrator can access via user-approved tool requests)
-- `memory/` - local logs and summaries:
-  - `cold_log.jsonl` (long-term, append-only log)
-  - `lukewarm.txt` (rolling summary)
-  - `departments.md` / `departments.json` (latest per-module "what happened" rundowns)
+- `memory/` - local audit history and summaries:
+  - `cold_log.jsonl` (long-term, append-only event log)
+  - `lukewarm.txt` (rolling summary; the app's `Luke Warm` UI label)
+  - `departments.md` / `departments.json` (compatibility filenames for latest per-module "what happened" rundowns)
 
 3) Build + run
 ```bash
@@ -115,7 +115,7 @@ cargo run --bin smoke_llama
   - anchored three-column chat workspace with `Hot Memory` on the left, the main transcript in the center, and `Luke Warm` memory on the right
   - the transcript and assistant thinking views are clamped to the center panel width so long sessions should wrap inward instead of slowly widening the whole workspace
   - multiline composer (`Enter` sends, `Shift+Enter` adds a new line)
-- **Hot memory**: small, user-visible "working set" of recent/pinned items.
+- **Hot Memory / active context**: small, user-visible working set of recent/pinned items.
 - **Models tab control surface**:
   - add BYO cloud model entries in-app
   - choose between OpenAI, OpenAI-compatible, Anthropic, and Gemini provider families
@@ -133,19 +133,19 @@ cargo run --bin smoke_llama
   - keep cloud models listed beside local GGUFs
   - choose separate model targets for the main orchestrator and the Bookkeeper
 - **Logs tab**:
-  - **bookkeeper** that records events/messages to disk (`cold_log.jsonl`)
+  - **Bookkeeper** support role that records events/messages to the local audit history (`cold_log.jsonl`)
   - semantic search (Option B, embeddings) + keyword search fallback (Option A)
-  - "Luke Warm" rolling summary persisted to `lukewarm.txt`
-  - semantic search filters by `module_id` (department) and/or `tag`
+  - `Luke Warm` rolling summary persisted to `lukewarm.txt`
+  - semantic search filters by `module_id` (module identifier, historically called department) and/or `tag`
   - append ad-hoc events with `module_id` + `tags` + optional `payload_json`
 - **Sandbox tab**: browse/edit/save files inside `Chatty_Sandbox/`.
 - **Sandbox task mode**:
   - the chat composer can explicitly mark a turn as a sandbox file task
   - choose `Create file` or `Edit file`, set a target `.md` / `.txt` path, and ChattyCog will steer the model toward deterministic sandbox JSON instead of making it infer intent from freeform wording
   - approved sandbox actions automatically open the touched file and focus the Sandbox tab
-- **Capsule library**:
-  - the Models tab includes a reusable capsule library for saved personality / behavior injections
-  - users can save multiple named capsules, activate one for the current task, or fall back to native ChattyCog voice
+- **Behaviour profile library**:
+  - the Models tab includes the `Capsule library` product surface for saved behaviour/style injections
+  - users can save multiple named profiles, activate one for the current task, or fall back to native ChattyCog voice
 - **Networking tab**:
   - discover nearby ChattyCog instances on the same trusted local network
   - connect/disconnect peers
