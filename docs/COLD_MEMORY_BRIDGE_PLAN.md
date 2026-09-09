@@ -348,7 +348,26 @@ Current implementation notes:
 - Candidate payloads include source path, event indexes, UTC timestamps, raw Unix milliseconds, and exact bounded transcript text.
 - `ColdMemoryAttachment::from_selected_ids` returns no receipt when no candidate IDs are selected.
 - Main prompt injection is next-send-only and appears under `USER-SELECTED COLD LOG CONTEXT`.
+- Remember searches append compact recall-session metadata to `memory/remember_recalls.jsonl`, including searched/cancelled/attached outcomes without transcript payloads.
+- Each Remember search gets a `recall_id` shaped like `remember-recall-{unix_ms}-{sequence}` that is reused by later cancel or attach receipts, so the audit trail can link proposal and user outcome. The id is an audit correlation key, not memory truth authority.
+- Selected Remember attachments append compact audit metadata to `memory/remember_attachments.jsonl`; this records refs/provenance, links back by `recall_id`, and does not copy hydrated transcript payloads.
+- Remember result feedback appends compact quality metadata to `memory/remember_feedback.jsonl` when the user marks a candidate stale, misleading, or noisy.
+- Future Remember searches annotate matching bounded candidates with prior feedback counts, but do not suppress, rewrite, demote, or auto-reject the evidence.
+- The Logs tab governance receipt viewer includes Remember sessions grouped by `recall_id` alongside semantic sort, placement review, and sift receipts.
+- The governance receipt viewer has a non-mutating text filter for recall ids, outcomes, bucket ids, query text, and other rendered metadata.
+- The Logs tab includes a recall route preview that summarizes atlas, semantic, direct cold-log lanes, and post-merge Remember candidate order for a phrase without attaching context or writing recall receipts.
 - The Remember UI presents three deliberate outcomes: inspect only, attach selected to the next turn, or cancel with no injection.
+- Remember candidate cards show the recall lane, semantic bucket/placement provenance where available, why the result surfaced, and a one-turn-only evidence warning.
+- Remember candidate cards can record recall-quality feedback without changing cold logs, semantic buckets, atlas records, or current context.
+- Cold atlas records can now be marked from the Logs tab as `needs_review`, `stale`, `retired`, or restored to `historical_shape`.
+- Cold atlas status changes rewrite only status/update metadata and append compact transition receipts; they do not rewrite transcript evidence, promote context, or inject anything into Main AI.
+- Cold atlas cards can hydrate each evidence ref into exact bounded cold-log context for inspection before the user revises or marks the record.
+- Existing cold atlas records can be staged for revision from the Logs tab. The revision panel preloads editable JSON from that record's current evidence refs.
+- Cold atlas revisions require a before/after preview for the exact current JSON, then commit a same-id in-place record replacement with a compact `revised` receipt.
+- Existing cold atlas records can also be staged for supersede. The panel preloads replacement JSON, requires a new `atlas_id`, previews the old record to mark `superseded`, and commits linked receipts for the old and replacement records.
+- The Logs tab renders atlas lineage rows from linked `related_atlas_id` receipts, keeping superseded broad-shape memory inspectable without making it normal recall material.
+- Atlas lineage rows expose old/replacement evidence inspection buttons that hydrate exact cold-log context without recalling it into Main AI.
+- The Logs tab includes an atlas query preview control for testing the atlas recall policy against a phrase without hydrating evidence, injecting context, or promoting memory.
 - Current tests cover bounded extraction, ignoring non-interaction events, explicit selection receipts, timestamp formatting, and historical-evidence boundary language.
 
 ## Non-Goals For V1
@@ -408,6 +427,7 @@ Possible storage:
 
 - `memory/cold_semantic/bucket_map.json`
 - `memory/cold_semantic/placements.jsonl`
+- `memory/cold_semantic/placement_review_receipts.jsonl`
 - `memory/cold_semantic/sift_proposals.jsonl`
 - `memory/cold_semantic/sift_receipts.jsonl`
 
@@ -417,12 +437,32 @@ Current implementation notes:
 - `ColdEvidenceRef` points to log ranges and metadata instead of storing replacement transcript text.
 - `ColdSemanticIndexPaths::under_memory_dir` resolves the planned `memory/cold_semantic/` layout.
 - `read_bucket_map_json` and `write_bucket_map_json` provide explicit `bucket_map.json` persistence.
+- `default_interaction_bucket_map` defines a small starter v1 map: entities, projects/code, preferences/workflow, open threads, plus misc.
+- The Logs tab exposes a user-triggered "Create starter bucket map" control and a read-only bucket-map inspection view.
 - Bucket-map validation requires frozen counts to match and exactly one misc bucket to exist.
 - `read_placements_jsonl` and `append_placement_jsonl` provide explicit placement JSONL persistence.
 - `append_validated_placement_jsonl` requires `bucket_map.json` and validates the placement before writing.
 - Placement validation rejects missing bucket refs and overflow placements that do not target misc.
 - `load_semantic_index_snapshot` reads bucket map and placements together, rejecting orphan placements without a map.
-- No automatic sorter, background writer, or bucket mutation path exists yet.
+- `src/memory/semantic_sorter.rs` prepares bounded cold-log interaction evidence, renders a strict sorter prompt, parses pasted sorter JSON, and commits validated proposed placements with a sort receipt.
+- `BookkeeperHandle::draft_semantic_sort` can draft sorter JSON from the prepared prompt using the existing Bookkeeper lane.
+- `render_semantic_sort_review_preview` validates sorter JSON and renders a human-readable placement preview without writing placements.
+- `render_semantic_bucket_placement_overview` renders the current bucket placement store by bucket, status, fit, source, event range, and reason without embedding transcript text.
+- `render_semantic_receipts_overview` renders sort, placement review, and sift receipts as an inspectable governance trail.
+- The Logs tab exposes the semantic sort lever as a deliberate staged operation: prepare prompt, optionally ask Bookkeeper to draft JSON, preview/edit the JSON, then commit.
+- Commit requires a successful preview receipt for the exact current JSON; editing the JSON invalidates the receipt and requires previewing again.
+- The Logs tab can refresh an inspectable bucket placement view, and successful commits refresh that view.
+- Semantic sort commits create proposed placements. Proposed placements are inspectable but inert for Remember.
+- The Logs tab can load proposed placements for review, let the user approve/reject selected placements, and apply those decisions deterministically.
+- Placement review includes both newly proposed placements and `needs_review` placements created by feedback-driven sifting.
+- Proposed placement review shows bucket labels/descriptions from the frozen bucket map and supports bucket/fit filtering.
+- Proposed placement cards can hydrate exact bounded cold-log context for inspection before approval; inspection does not approve, inject, promote, or rewrite memory.
+- Placement reviews rewrite placement statuses and append durable review receipts to `placement_review_receipts.jsonl`, including status transitions such as `needs_review -> approved`.
+- The Logs tab can refresh governance receipts so semantic memory mutations remain visible after the fact.
+- Semantic bucket search uses approved placements only.
+- Semantic bucket query preview shows which approved evidence refs would surface for a phrase, with an `include_misc` toggle for the weak-fit lane.
+- The memory test suite covers the full approved semantic recall loop: interaction cold log, proposed placement, user approval, semantic Remember hit, exact bounded hydration, explicit selection, and host-owned injection boundary.
+- No automatic sorter, background writer, or autonomous bucket mutation path exists yet.
 
 Important rules:
 
@@ -432,6 +472,8 @@ Important rules:
 - Weak fits should stay visible rather than forced into a false bucket.
 - Overflow placements must target the misc bucket.
 - Bucket search should return candidate evidence refs, then the governor hydrates exact surrounding transcript context from the linear log.
+- Bucket search should consider approved placements only; proposed placements are not recall-active.
+- The Logs tab can preview bucket search policy without hydrating evidence, injecting context, or promoting memory.
 - Bucket placement relevance is not present-day truth.
 - The user still decides what enters Main AI context.
 
@@ -504,6 +546,18 @@ Sifting must not:
 - collapse temporally distinct events into one unsupported memory
 - auto-approve model cleanup proposals
 
+Current implementation notes:
+
+- `ColdBucketSiftProposal` and `ColdBucketSiftChange` model proposed bucket cleanup without touching cold logs.
+- `build_bucket_sift_proposal` detects the first deterministic cleanup cases: duplicate active placements for the same evidence ref and weak positive-bucket fits that should move to misc.
+- Bucket sifting can read Remember feedback receipts and propose `needs_review` changes for placements whose bounded evidence has prior noise or misleading marks.
+- New sift changes are deselected by default. The user must explicitly check each change before applying it.
+- The Logs tab exposes a "Bucket sifting" review panel with bucket selection, proposal creation, per-change checkboxes, exact cold-log context inspection, and an "Apply selected sift" action.
+- Exact context inspection hydrates the referenced cold-log exchange through the governor. Inspection does not approve, inject, promote, or rewrite memory.
+- `apply_selected_sift_changes_to_store` rewrites only the placement index, never the source cold log, and appends a durable receipt to `sift_receipts.jsonl`.
+- Selected feedback-driven sift changes mark the placement `needs_review` rather than silently rejecting or deleting the evidence.
+- Sift proposals are also appended to `sift_proposals.jsonl`, creating a visible trail of proposed cleanup even when the user applies nothing.
+
 ## Phase 4: Cold Atlas
 
 Goal: add a compact broad-memory layer above cold evidence.
@@ -522,6 +576,32 @@ Atlas records should:
 - never replace the underlying evidence
 
 The cold-log summarizer should produce candidates or drafts first. A host/user review path should decide what becomes atlas memory.
+
+Current implementation notes:
+
+- `src/memory/cold_atlas.rs` defines the first cold-atlas record, confidence, status, path, and receipt contracts.
+- The v1 atlas store uses `memory/cold_atlas/atlas_records.jsonl` and `memory/cold_atlas/atlas_receipts.jsonl` for inspectable JSONL persistence.
+- Atlas records require at least one `ColdEvidenceRef`, so broad shape memory must point down to exact cold-log evidence rather than floating free.
+- Atlas receipts are compact governance metadata and do not duplicate transcript payloads.
+- The Logs tab exposes a read-only "Refresh atlas" inspection control for broad shape records.
+- The governance receipt viewer includes cold-atlas receipts alongside semantic and Remember receipts.
+- The Logs tab exposes a staged cold-atlas draft flow: prepare from approved semantic placements, paste/edit atlas JSON, preview the exact current JSON, then commit.
+- Atlas draft prompts carry approved semantic placement refs and reasons, not hydrated transcript payloads.
+- The staged draft flow can ask Bookkeeper to draft atlas JSON from the prepared prompt; the draft remains editable and inert until previewed and committed by the host.
+- Commit requires a successful preview for the exact current JSON, then writes atlas records plus compact receipts.
+- Remember can query cold-atlas records as a broad-orientation lane, then hydrate each matching evidence ref through the governor into exact bounded cold-log transcript candidates.
+- Normal Remember atlas lookup excludes `retired` records and default-excludes `superseded` records so replaced shapes do not compete with their replacements.
+- Atlas recall candidates are labeled as cold-atlas sourced in the Remember UI and show atlas title, id, summary, scope, status, and confidence as orientation metadata.
+- Atlas summary text explains why a candidate surfaced; it is kept out of the attachable exact transcript payload unless the same text exists in the source cold-log context.
+- Atlas recall candidates remain user-selected, one-turn-only evidence.
+- Atlas evidence inspection uses the same governor hydration path as Remember, semantic review, and bucket sifting. Inspection is read-only and cannot revise, inject, promote, or rewrite memory by itself.
+- Existing atlas records can be revised through a staged before/after flow that uses only that record's current evidence refs and requires the same `atlas_id`.
+- Revision commits replace the broad atlas record in place, preserve the original creation timestamp, reset status to `historical_shape`, and append a compact `revised` receipt without transcript payloads.
+- Supersede commits append one replacement atlas record, mark the old record `superseded`, and include `related_atlas_id` links in both compact receipts.
+- Superseded records are preserved for lineage and governance inspection, but are not normal atlas recall candidates unless a caller explicitly opts into superseded lookup.
+- Atlas lineage is rendered from receipts rather than a separate relationship store, and interactive rows reuse the same read-only evidence inspection path as atlas cards.
+- Atlas query preview shows broad-shape matches and evidence refs only; it is a diagnostic view, not a Remember attachment path.
+- No automatic atlas summarizer, background writer, promotion path, or direct atlas-to-Main-AI injection path exists yet.
 
 ## Phase 5: Routing Packets
 
@@ -570,7 +650,6 @@ Rules:
 ## Open Design Questions
 
 - Should Remember candidates be attached only to the next turn, or optionally pinned for the current mini-thread?
-- Should selected cold evidence create a small attachment receipt in a separate log?
 - Should semantic bucket placement happen synchronously as events are logged, or in a background batch pass?
 - Should v1 semantic buckets be user-authored, model-authored, or generated from a fixed default map?
 - Should an evidence ref be allowed in multiple buckets by default, or only after review?

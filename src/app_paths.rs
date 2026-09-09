@@ -251,10 +251,20 @@ fn skip_bytes(file: &mut std::fs::File, len: u64) -> Result<()> {
 }
 
 fn sanitize_lukewarm_summary_for_ui(raw: &str) -> String {
+    let Some(protocol_visible) = gpt_oss_final_visible_or_empty(raw) else {
+        return sanitize_lukewarm_summary_text(raw);
+    };
+    sanitize_lukewarm_summary_text(protocol_visible)
+}
+
+fn sanitize_lukewarm_summary_text(raw: &str) -> String {
     let cleaned = raw
         .replace("<bullet>", "")
         .replace("<paragraph>", "")
         .replace("```", "")
+        .replace("<|start|>", "")
+        .replace("<|end|>", "")
+        .replace("<|return|>", "")
         .trim()
         .to_string();
     if cleaned.is_empty() {
@@ -271,10 +281,11 @@ fn sanitize_lukewarm_summary_for_ui(raw: &str) -> String {
                 .to_string()
         })
         .filter(|line| !looks_like_lukewarm_scaffolding(line))
+        .filter(|line| !looks_like_lukewarm_instruction_echo(line))
         .filter(|line| !line.is_empty())
         .collect();
 
-    if lines.is_empty() {
+    if lines.is_empty() || looks_like_lukewarm_non_summary(&lines.join(" ")) {
         return String::new();
     }
 
@@ -289,6 +300,22 @@ fn sanitize_lukewarm_summary_for_ui(raw: &str) -> String {
         headline
     } else {
         format!("{headline}\n{body}")
+    }
+}
+
+/// `Some("")` is intentional: a protocol completion that contains analysis
+/// but no final answer has no safe UI content.
+fn gpt_oss_final_visible_or_empty(raw: &str) -> Option<&str> {
+    let lower = raw.to_ascii_lowercase();
+    const ANALYSIS: &str = "<|channel|>analysis<|message|>";
+    const FINAL: &str = "<|channel|>final<|message|>";
+
+    if let Some(idx) = lower.rfind(FINAL) {
+        Some(&raw[idx + FINAL.len()..])
+    } else if lower.contains(ANALYSIS) {
+        Some("")
+    } else {
+        None
     }
 }
 
@@ -307,6 +334,46 @@ fn looks_like_lukewarm_scaffolding(line: &str) -> bool {
     ]
     .iter()
     .any(|pattern| normalized.starts_with(pattern))
+}
+
+fn looks_like_lukewarm_non_summary(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    [
+        "i'm ready to help",
+        "i am ready to help",
+        "could you share",
+        "please share the recent activity",
+        "ask for activity",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+}
+
+fn looks_like_lukewarm_instruction_echo(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    let direct_echoes = [
+        "we need to produce a bullet",
+        "we need to produce one bullet",
+        "we need to produce:",
+        "we need to summarize this chat",
+        "one bullet and one short paragraph",
+        "one bullet point, one paragraph",
+        "the user wants a bullet",
+        "the user wants a paragraph",
+        "summarizing the recent activity",
+        "output format",
+        "the instruction specifies",
+        "single bullet point followed by a paragraph",
+        "this format ensures",
+        "paragraph should be max",
+        "bullet should be concise",
+        "we need to keep it short",
+        "let's count",
+        "that's 30 words",
+    ];
+    direct_echoes.iter().any(|pattern| normalized.contains(pattern))
+        || normalized.match_indices("the user wants").count() >= 3
+        || normalized.match_indices("we need to").count() >= 3
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -360,9 +427,8 @@ mod tests {
 
     #[test]
     fn lukewarm_ui_sanitizer_keeps_long_body_context() {
-        let body =
-            "The rolling summary should stay readable across repeated bookkeeper updates. "
-                .repeat(8);
+        let body = "The rolling summary should stay readable across repeated bookkeeper updates. "
+            .repeat(8);
         let raw = format!("- Summary refreshed.\n{body}Next action remains visible.");
 
         let sanitized = sanitize_lukewarm_summary_for_ui(&raw);
@@ -373,6 +439,55 @@ mod tests {
             sanitized.chars().count() > 500,
             "UI sanitizer over-truncated the rolling summary: {sanitized}"
         );
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_never_shows_incomplete_gpt_oss_scratch_work() {
+        let raw = "We need to ask for activity.<|end|><|start|>assistant<|channel|>analysis<|message|>No activity is available.";
+
+        assert!(sanitize_lukewarm_summary_for_ui(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_extracts_only_gpt_oss_final_channel() {
+        let raw = "Scratch work.<|start|>assistant<|channel|>analysis<|message|>Plan.\
+<|end|><|start|>assistant<|channel|>final<|message|>- Summary refreshed.\nCurrent work remains available.<|end|>";
+
+        let sanitized = sanitize_lukewarm_summary_for_ui(raw);
+
+        assert_eq!(sanitized, "- Summary refreshed.\nCurrent work remains available.");
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_hides_repeated_summary_instruction_echoes() {
+        let raw = "- We need to produce a bullet and a paragraph summarizing the recent activity. \
+The user wants a bullet and a paragraph. The user wants a bullet and a paragraph.";
+
+        assert!(sanitize_lukewarm_summary_for_ui(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_hides_output_format_echoes() {
+        let raw = "- The output format requires a single bullet point followed by a paragraph. \
+The instruction specifies that the assistant should provide a concise bullet. This format ensures clarity and brevity.";
+
+        assert!(sanitize_lukewarm_summary_for_ui(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_hides_max_word_count_prompt_echoes() {
+        let raw = "We need to summarize this chat. We need to produce: One bullet point, one paragraph. \
+The paragraph should be max 80 words. The bullet should be concise.";
+
+        assert!(sanitize_lukewarm_summary_for_ui(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_ui_sanitizer_hides_self_counted_prompt_echoes() {
+        let raw = "We need to keep it short. Let's count: that is 30 words.\n\
+The user wants to know the workflow again.";
+
+        assert!(sanitize_lukewarm_summary_for_ui(raw).is_empty());
     }
 
     #[test]

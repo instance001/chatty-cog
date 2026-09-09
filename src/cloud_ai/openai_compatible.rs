@@ -75,16 +75,12 @@ impl CloudProviderAdapter for OpenAiCompatibleAdapter {
     }
 
     fn embed_text(&self, input: &str) -> Result<Vec<f32>> {
-        let model = self
-            .target
-            .embedding_model_name
-            .as_deref()
-            .ok_or_else(|| {
-                anyhow!(
-                    "cloud model '{}' is missing an embedding model name",
-                    self.target.display_name
-                )
-            })?;
+        let model = self.target.embedding_model_name.as_deref().ok_or_else(|| {
+            anyhow!(
+                "cloud model '{}' is missing an embedding model name",
+                self.target.display_name
+            )
+        })?;
 
         let url = format!("{}/embeddings", self.target.base_url);
         let body = json!({

@@ -102,14 +102,71 @@ In practice, ChattyCog now treats "model selection" as a shared routing problem 
   - limits v1 retrieval to pure user/assistant interaction events
   - extracts the matched exchange plus one complete exchange before and after where available
   - preserves source path, event indexes, timestamp metadata, and the exact bounded transcript block
+  - surfaces recall lane, bucket, placement, and reason metadata in Remember result cards before attachment
   - renders selected cold context under a host-owned boundary that says it is historical evidence, not current truth
+  - exposes the host-owned Remember injection renderer used by Main AI system prompt construction
+  - appends compact Remember recall-session receipts to `memory/remember_recalls.jsonl` for searched/cancelled/attached outcomes, linked by a timestamp-plus-sequence `recall_id`
+  - appends compact Remember attachment audit receipts to `memory/remember_attachments.jsonl` linked by `recall_id` without storing hydrated transcript text
+  - appends compact Remember feedback receipts to `memory/remember_feedback.jsonl` when the user marks a proposed result stale, misleading, or noisy
+  - annotates future Remember candidates with prior feedback counts for the same bounded evidence without suppressing or mutating the result
+  - includes Remember recall/attachment receipts grouped by `recall_id` in the Logs tab governance receipt viewer
+  - filters the rendered governance receipt view without changing receipt files
+  - exposes a Logs-tab recall route preview that summarizes atlas, semantic, direct cold-log lanes, and post-merge Remember candidate order without attaching context or writing recall receipts
   - does not promote selected material into active context, rolling summary, module status updates, or durable memory
+- `src/memory/cold_atlas.rs`
+  - first inspectable data model for broad cold-memory shape records
+  - stores atlas records in `memory/cold_atlas/atlas_records.jsonl`
+  - stores atlas governance receipts in `memory/cold_atlas/atlas_receipts.jsonl`
+  - requires each atlas record to point down to at least one `ColdEvidenceRef`
+  - records status/currentness and confidence without claiming present-day truth
+  - exposes read-only atlas and receipt renderers for the Logs tab
+  - prepares atlas draft prompts from approved semantic placements without hydrating transcript payloads
+  - can ask the existing Bookkeeper lane to draft cold-atlas JSON into an editable UI field
+  - validates pasted atlas JSON against the prepared evidence IDs before preview or commit
+  - requires the exact current JSON to be previewed before atlas records can be committed
+  - lets the user mark atlas records as `needs_review`, `stale`, `retired`, or restored to `historical_shape` from the Logs tab
+  - rewrites only atlas record status/update metadata for status changes, then appends compact transition receipts without transcript payloads
+  - lets the user inspect each atlas evidence ref by hydrating the exact bounded cold-log context through the governor without revising, injecting, promoting, or rewriting memory
+  - lets the user stage an existing atlas record for revision, prefilled as editable JSON from its current evidence refs
+  - requires revision preview to show before/after state before committing a same-id in-place revision with a compact `revised` receipt
+  - lets the user stage a supersede flow that creates a new replacement atlas record, marks the old record `superseded`, and links both compact receipts by related atlas id
+  - renders read-only atlas lineage rows from linked receipts so superseded records remain inspectable without being normal Remember candidates
+  - lineage rows expose old/replacement evidence inspection buttons that hydrate exact cold-log context without recalling it into Main AI
+  - exposes a Logs-tab atlas query preview that runs the same atlas recall policy without hydrating evidence, injecting context, or promoting memory
+  - provides a deterministic atlas query lane for Remember over atlas title, summary, scope, note, and tags
+  - excludes `retired` and default-excludes `superseded` atlas records from normal Remember recall; superseded records are available only through explicit lineage-style query
+  - atlas Remember hits are hydrated through the governor into exact bounded cold-log transcript candidates before user selection
+  - keeps atlas explanation metadata visible in Remember cards while excluding atlas summaries from the exact payload that can be attached
+  - is not wired to automatic summarization, promotion, or direct Main AI injection
 - `src/memory/semantic_index.rs`
-  - inert first-pass data model for a future meaning-sorted cold retrieval lane
+  - inspectable data model for the meaning-sorted cold retrieval lane
   - defines semantic buckets, evidence refs, bucket placements, sift proposals, and sift receipts
   - mirrors the semantic-sorter shape: positive buckets plus exactly one required misc bucket for weak or non-fitting evidence
+  - provides the starter v1 interaction bucket map used by the Logs tab bootstrap control
   - stores references and metadata over cold evidence rather than replacement transcript text
-  - keeps bucket placement and bucket sifting reviewable before any future mutation path exists
+  - keeps bucket placement and bucket sifting reviewable before mutation by requiring user-selected approval/apply receipts
+  - can use prior Remember noise/misleading feedback as a review signal during bucket-sift proposal generation
+  - marks selected feedback-driven sift changes as `needs_review` instead of silently rejecting evidence
+  - applies approved sift changes only to the semantic placement index; cold logs remain the immutable evidence source
+- `src/memory/semantic_sorter.rs`
+  - prepares bounded cold-log interaction evidence after the latest semantic sort cursor
+  - renders an inspectable sorter prompt against the frozen bucket map
+  - parses pasted sorter JSON and commits only validated proposed placements plus a receipt
+  - can ask the existing Bookkeeper lane to draft sorter JSON, leaving the result in an editable UI field
+  - renders a review preview from the same parser used by commit, so invalid bucket decisions are caught before writing
+  - requires the exact current JSON to have a successful preview receipt before commit is enabled
+  - exposes a read-only bucket placement overview so proposed refs are inspectable without copying transcript text into the index
+  - keeps sorter-created placements in `proposed` status until the user approves or rejects them from the Logs tab
+  - shows bucket labels/descriptions, review status, and bucket/fit filters during placement review
+  - includes `needs_review` placements in the same explicit approve/reject review queue
+  - lets proposed placement review hydrate exact bounded cold-log context for inspection without approving or injecting it
+  - appends durable placement-review receipts with status transitions when user approval/rejection is applied
+  - exposes sort, placement-review, and sift receipts in a read-only governance receipt viewer
+  - supports a Logs tab bucket-sifting panel that proposes duplicate/weak-fit cleanup, lets the user inspect exact evidence, and applies only selected changes
+  - uses approved placements only for semantic Remember lookup
+  - exposes a Logs-tab semantic bucket query preview over approved placements without hydrating evidence, injecting context, or promoting memory
+  - has an end-to-end memory test covering proposed placement inertia, user approval, semantic recall, bounded hydration, and selected attachment rendering
+  - remains host-bounded: no automatic sorting, no transcript rewriting, and no promotion into current context
 
 ## Cold log envelope (schemaless)
 
@@ -137,7 +194,7 @@ Note: the JSONL writer currently includes some duplicate keys for backwards-comp
 - Rolling summary (`Luke Warm` UI label): summary to keep context usable without bloating prompts.
 - Audit history / event log (`cold_log.jsonl`): full append-only record for later retrieval.
 - Remember (host/governor): deliberate user-triggered recall from cold logs. Search proposes bounded historical candidates; the user selects; the host injects only selected exact transcript blocks into the next Main AI turn.
-- Cold semantic index (planned): meaning-sorted buckets over exact evidence refs. The index should reduce retrieval cost, then hydrate exact surrounding context from the linear cold log before user selection.
+- Cold semantic index: meaning-sorted buckets over exact evidence refs. Approved placements reduce retrieval cost, then hydrate exact surrounding context from the linear cold log before user selection.
 
 Working doctrine:
 

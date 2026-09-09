@@ -3,11 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use libloading::{Library, Symbol};
 
 use crate::app_paths::read_gguf_architecture;
 use crate::llama_sys::*;
+
+/// Local chat contexts are explicitly set rather than inheriting llama.cpp's
+/// 512-token default. Output caps remain a separate per-request setting.
+pub const LOCAL_CHAT_CONTEXT_TOKENS: u32 = 4096;
+pub const LOCAL_CHAT_SAFE_CONTEXT_TOKENS: u32 = 2048;
+pub const LOCAL_BOOKKEEPER_CONTEXT_TOKENS: u32 = 4096;
 
 fn llama_runtime_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -657,19 +663,13 @@ impl Llama {
         let _mguard = ModelFreeGuard { llama: self, model };
 
         let mut cparams = unsafe { (self.llama_context_default_params)() };
-        if cparams.n_ctx == 0 {
-            cparams.n_ctx = 2048;
-        }
-        if cparams.n_batch == 0 {
-            cparams.n_batch = 512;
-        }
-        if cparams.n_ubatch == 0 {
-            cparams.n_ubatch = cparams.n_batch;
-        }
-        if cparams.n_batch > cparams.n_ctx {
-            cparams.n_batch = cparams.n_ctx.max(1);
-        }
-        // Safer defaults for CPU-only helper generations (bookkeeper, etc).
+        // llama.cpp defaults to 512 tokens here. That is too small for Bookkeeper
+        // JSON drafting, where the frozen bucket map, evidence refs, and requested
+        // response must coexist in one context.
+        cparams.n_ctx = LOCAL_BOOKKEEPER_CONTEXT_TOKENS;
+        cparams.n_batch = 512;
+        cparams.n_ubatch = cparams.n_batch;
+        // Safer defaults for CPU-only helper generations (Bookkeeper, etc).
         cparams.flash_attn_type = llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_DISABLED;
         cparams.offload_kqv = false;
         cparams.op_offload = false;
@@ -708,6 +708,14 @@ impl Llama {
         }
 
         let prompt_tokens = self.tokenize(vocab, prompt, true)?;
+        let required_context = prompt_tokens.len().saturating_add(max_tokens);
+        if required_context > cparams.n_ctx as usize {
+            bail!(
+                "CPU helper prompt needs {required_context} tokens (prompt {} + output {max_tokens}), exceeding its {} token context",
+                prompt_tokens.len(),
+                cparams.n_ctx
+            );
+        }
         let mut n_past: llama_pos = 0;
         self.eval_chunked(ctx, &prompt_tokens, n_past, 512)?;
         n_past += prompt_tokens.len() as llama_pos;
@@ -763,8 +771,8 @@ impl Llama {
         // defaults to 512 here, which is too small once the GUI injects memory/sandbox
         // context, so choose the app's desired chat context explicitly.
         let desired_ctx: u32 = match profile {
-            ContextProfile::Default => 4096,
-            ContextProfile::Safe => 2048,
+            ContextProfile::Default => LOCAL_CHAT_CONTEXT_TOKENS,
+            ContextProfile::Safe => LOCAL_CHAT_SAFE_CONTEXT_TOKENS,
         };
         let desired_batch: u32 = match profile {
             ContextProfile::Default => 512,

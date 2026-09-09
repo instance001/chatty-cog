@@ -246,7 +246,8 @@ impl ChattyCogApp {
                                     .unwrap_or(&image_path)
                                     .to_string_lossy()
                                     .replace('\\', "/");
-                                status_lines.push(format!("Selected image {file_label} for inspection"));
+                                status_lines
+                                    .push(format!("Selected image {file_label} for inspection"));
                                 result_lines.push(format!(
                                     "sandbox.read `{path}` succeeded.\nAttached sandbox image `{file_label}` for multimodal inspection on the continuation turn."
                                 ));
@@ -273,7 +274,9 @@ impl ChattyCogApp {
                                     last_opened = Some(dir.join(rel));
                                 }
                             }
-                            Err(e) => status_lines.push(format!("Read blocked/failed ({path}): {e}")),
+                            Err(e) => {
+                                status_lines.push(format!("Read blocked/failed ({path}): {e}"))
+                            }
                         }
                     }
                 }
@@ -418,7 +421,8 @@ impl ChattyCogApp {
             }
         }
 
-        if continue_after && !self.is_generating && !self.sandbox_last_tool_result.trim().is_empty() {
+        if continue_after && !self.is_generating && !self.sandbox_last_tool_result.trim().is_empty()
+        {
             let continuation_prompt =
                 "Continue from the approved sandbox tool result and help with the current task. If another sandbox action is needed, request it as JSON.".to_string();
             if let Some(image_path) = selected_image_for_continuation

@@ -4,9 +4,9 @@ use anyhow::{Result, anyhow};
 
 use crate::preferences::{CloudModelEntry, CloudProviderKind};
 
-pub mod openai_compatible;
 pub mod anthropic;
 pub mod gemini;
+pub mod openai_compatible;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCapabilities {
@@ -95,7 +95,10 @@ pub fn provider_capabilities(kind: CloudProviderKind) -> ProviderCapabilities {
     }
 }
 
-pub fn resolve_cloud_target(entry: &CloudModelEntry, lane: ModelLane) -> Result<ResolvedCloudTarget> {
+pub fn resolve_cloud_target(
+    entry: &CloudModelEntry,
+    lane: ModelLane,
+) -> Result<ResolvedCloudTarget> {
     let id = entry.id.trim().to_string();
     let mut display_name = entry.display_name.trim().to_string();
     let api_key = entry.api_key.trim().to_string();
@@ -114,16 +117,25 @@ pub fn resolve_cloud_target(entry: &CloudModelEntry, lane: ModelLane) -> Result<
         return Err(anyhow!("cloud model entry is missing a display name"));
     }
     if api_key.is_empty() {
-        return Err(anyhow!("cloud model '{}' is missing an API key", display_name));
+        return Err(anyhow!(
+            "cloud model '{}' is missing an API key",
+            display_name
+        ));
     }
     if base_url.is_empty() {
         base_url = default_base_url(entry.provider_kind.clone()).to_string();
     }
     if base_url.is_empty() {
-        return Err(anyhow!("cloud model '{}' is missing a base URL", display_name));
+        return Err(anyhow!(
+            "cloud model '{}' is missing a base URL",
+            display_name
+        ));
     }
     if chat_model_name.is_empty() {
-        return Err(anyhow!("cloud model '{}' is missing a chat model name", display_name));
+        return Err(anyhow!(
+            "cloud model '{}' is missing a chat model name",
+            display_name
+        ));
     }
 
     let capabilities = provider_capabilities(entry.provider_kind.clone());
@@ -155,9 +167,9 @@ pub fn resolve_cloud_target(entry: &CloudModelEntry, lane: ModelLane) -> Result<
 
 pub fn build_adapter(target: ResolvedCloudTarget) -> Result<Box<dyn CloudProviderAdapter>> {
     match target.provider_kind {
-        CloudProviderKind::OpenAi | CloudProviderKind::OpenAiCompatible => {
-            Ok(Box::new(openai_compatible::OpenAiCompatibleAdapter::new(target)?))
-        }
+        CloudProviderKind::OpenAi | CloudProviderKind::OpenAiCompatible => Ok(Box::new(
+            openai_compatible::OpenAiCompatibleAdapter::new(target)?,
+        )),
         CloudProviderKind::Anthropic => Ok(Box::new(anthropic::AnthropicAdapter::new(target)?)),
         CloudProviderKind::Gemini => Ok(Box::new(gemini::GeminiAdapter::new(target)?)),
     }
@@ -191,7 +203,11 @@ pub fn resolve_model_selection_for_dirs(
     cloud_models: &[CloudModelEntry],
     selection: Option<&str>,
     lane: ModelLane,
-    resolve_portable_model_hint_for_dirs: fn(Option<&Path>, Option<&Path>, Option<&str>) -> Option<PathBuf>,
+    resolve_portable_model_hint_for_dirs: fn(
+        Option<&Path>,
+        Option<&Path>,
+        Option<&str>,
+    ) -> Option<PathBuf>,
 ) -> Option<ResolvedModelTarget> {
     let selection = selection?.trim();
     if selection.is_empty() {

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::cloud_ai::{CloudProviderAdapter, ResolvedCloudTarget, build_adapter};
+use crate::app_paths::read_gguf_architecture;
 use crate::llama_dyn::Llama;
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,16 @@ pub enum BookkeeperCmd {
         input: String,
         reply: Sender<String>,
     },
+    DraftSemanticSort {
+        prompt: String,
+        max_tokens: usize,
+        reply: Sender<Result<String, String>>,
+    },
+    DraftColdAtlas {
+        prompt: String,
+        max_tokens: usize,
+        reply: Sender<Result<String, String>>,
+    },
     Search {
         query: String,
         module: Option<String>,
@@ -113,9 +124,7 @@ impl BookkeeperHandle {
 
         let (tx, rx) = crossbeam_channel::unbounded::<BookkeeperCmd>();
         std::thread::spawn(move || {
-            if let Err(e) =
-                run_local_bookkeeper(&runtime_dir, &model_path, &data_dir, config, rx)
-            {
+            if let Err(e) = run_local_bookkeeper(&runtime_dir, &model_path, &data_dir, config, rx) {
                 eprintln!("bookkeeper error: {e:#}");
             }
         });
@@ -207,6 +216,34 @@ impl BookkeeperHandle {
         rrx.recv().map_err(|e| anyhow!("{e}"))
     }
 
+    pub fn draft_semantic_sort(&self, prompt: String, max_tokens: usize) -> Result<String> {
+        let (rtx, rrx) = crossbeam_channel::bounded(1);
+        self.tx
+            .send(BookkeeperCmd::DraftSemanticSort {
+                prompt,
+                max_tokens,
+                reply: rtx,
+            })
+            .map_err(|e| anyhow!("{e}"))?;
+        rrx.recv()
+            .map_err(|e| anyhow!("{e}"))?
+            .map_err(|e| anyhow!("{e}"))
+    }
+
+    pub fn draft_cold_atlas(&self, prompt: String, max_tokens: usize) -> Result<String> {
+        let (rtx, rrx) = crossbeam_channel::bounded(1);
+        self.tx
+            .send(BookkeeperCmd::DraftColdAtlas {
+                prompt,
+                max_tokens,
+                reply: rtx,
+            })
+            .map_err(|e| anyhow!("{e}"))?;
+        rrx.recv()
+            .map_err(|e| anyhow!("{e}"))?
+            .map_err(|e| anyhow!("{e}"))
+    }
+
     pub fn shutdown(&self) {
         let _ = self.tx.send(BookkeeperCmd::Shutdown);
     }
@@ -232,15 +269,20 @@ fn run_local_bookkeeper(
     rx: Receiver<BookkeeperCmd>,
 ) -> Result<()> {
     let llama = Llama::load(runtime_dir)?;
+    let gpt_oss_json_mode = read_gguf_architecture(model_path)
+        .ok()
+        .flatten()
+        .is_some_and(|architecture| architecture.eq_ignore_ascii_case("gpt-oss"));
 
     let mut store = Store::load(data_dir)?;
     let cancel = Arc::new(AtomicBool::new(false));
+    let generation_top_k = config.top_k;
     let mut lukewarm = LukeWarm::new(config, data_dir);
     let mut dept_status =
         DepartmentStatus::load(data_dir).unwrap_or_else(|_| DepartmentStatus::new(data_dir));
     if lukewarm.summary.is_empty() {
         if let Ok(s) = std::fs::read_to_string(&lukewarm.summary_path) {
-            let s = s.trim().to_string();
+            let s = sanitize_lukewarm_output(&s);
             if !s.is_empty() {
                 lukewarm.summary = s;
             }
@@ -287,6 +329,52 @@ fn run_local_bookkeeper(
                     summarize_module_rundown(&llama, model_path, &cancel, &module_id, &input);
                 let _ = reply.send(summary);
             }
+            BookkeeperCmd::DraftSemanticSort {
+                prompt,
+                max_tokens,
+                reply,
+            } => {
+                let mut out = String::new();
+                let draft_prompt = local_json_draft_prompt(&prompt, gpt_oss_json_mode);
+                let result = llama
+                    .generate_chat(
+                        model_path,
+                        "You are the Bookkeeper semantic sorter. Return compact JSON only.",
+                        &draft_prompt,
+                        max_tokens.max(256),
+                        0.1,
+                        0.95,
+                        generation_top_k,
+                        &cancel,
+                        |t| out.push_str(t),
+                    )
+                    .and_then(|_| sanitize_required_json_candidate(&out))
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+            BookkeeperCmd::DraftColdAtlas {
+                prompt,
+                max_tokens,
+                reply,
+            } => {
+                let mut out = String::new();
+                let draft_prompt = local_json_draft_prompt(&prompt, gpt_oss_json_mode);
+                let result = llama
+                    .generate_chat(
+                        model_path,
+                        "You are the Bookkeeper cold-atlas drafter. Return compact JSON only.",
+                        &draft_prompt,
+                        max_tokens.max(256),
+                        0.1,
+                        0.95,
+                        generation_top_k,
+                        &cancel,
+                        |t| out.push_str(t),
+                    )
+                    .and_then(|_| sanitize_required_json_candidate(&out))
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
             BookkeeperCmd::Search {
                 query,
                 module,
@@ -329,7 +417,7 @@ fn run_cloud_bookkeeper(
         DepartmentStatus::load(data_dir).unwrap_or_else(|_| DepartmentStatus::new(data_dir));
     if lukewarm.summary.is_empty() {
         if let Ok(s) = std::fs::read_to_string(&lukewarm.summary_path) {
-            let s = s.trim().to_string();
+            let s = sanitize_lukewarm_output(&s);
             if !s.is_empty() {
                 lukewarm.summary = s;
             }
@@ -371,6 +459,30 @@ fn run_cloud_bookkeeper(
             } => {
                 let summary = summarize_module_rundown_cloud(&*client, &module_id, &input);
                 let _ = reply.send(summary);
+            }
+            BookkeeperCmd::DraftSemanticSort {
+                prompt,
+                max_tokens,
+                reply,
+            } => {
+                let system = "You are the Bookkeeper semantic sorter. Return compact JSON only.";
+                let result = client
+                    .chat_completion(system, &prompt, max_tokens.max(256), 0.1, 0.95)
+                    .and_then(|out| sanitize_required_json_candidate(&out))
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+            BookkeeperCmd::DraftColdAtlas {
+                prompt,
+                max_tokens,
+                reply,
+            } => {
+                let system = "You are the Bookkeeper cold-atlas drafter. Return compact JSON only.";
+                let result = client
+                    .chat_completion(system, &prompt, max_tokens.max(256), 0.1, 0.95)
+                    .and_then(|out| sanitize_required_json_candidate(&out))
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
             }
             BookkeeperCmd::Search {
                 query,
@@ -470,6 +582,66 @@ fn clamp_chars_ellipsis(s: &str, max_chars: usize) -> String {
     out
 }
 
+fn sanitize_json_candidate(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let unfenced = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|body| body.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+
+    if serde_json::from_str::<serde_json::Value>(unfenced).is_ok() {
+        return unfenced.to_string();
+    }
+
+    // Some local models prefix an otherwise-valid JSON response with reasoning
+    // or their chat-protocol markers. Parse from each object boundary so a
+    // valid JSON value can be recovered without trusting surrounding text.
+    for (start, _) in unfenced.match_indices('{') {
+        let mut values = serde_json::Deserializer::from_str(&unfenced[start..])
+            .into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = values.next()
+            && value.is_object()
+        {
+            // Keep the model's JSON bytes rather than serializing `value` again:
+            // downstream review can preserve its field order and whitespace.
+            return unfenced[start..start + values.byte_offset()].trim().to_string();
+        }
+    }
+
+    unfenced.to_string()
+}
+
+fn local_json_draft_prompt(prompt: &str, gpt_oss_json_mode: bool) -> String {
+    if !gpt_oss_json_mode {
+        return prompt.to_string();
+    }
+
+    // GPT-OSS can spend an entire small structured-output budget in its analysis
+    // channel. Start its final constrained JSON channel explicitly; ordinary GGUF
+    // chat models continue to receive the portable plain-language prompt above.
+    format!(
+        "{}\n\n<|start|>assistant<|channel|>final <|constrain|>JSON<|message|>",
+        prompt.trim_end()
+    )
+}
+
+fn sanitize_required_json_candidate(raw: &str) -> Result<String> {
+    let candidate = sanitize_json_candidate(raw);
+    if candidate.trim().is_empty() {
+        anyhow::bail!(
+            "Bookkeeper produced no visible structured output; no draft was accepted or written"
+        );
+    }
+    Ok(candidate)
+}
+
 fn sanitize_rundown_output(module_id: &str, raw: &str) -> String {
     fn clamp_chars(s: &str, max_chars: usize) -> String {
         if s.chars().count() <= max_chars {
@@ -546,7 +718,7 @@ fn sanitize_lukewarm_output(raw: &str) -> String {
         out
     }
 
-    let mut s = raw.trim().to_string();
+    let mut s = gpt_oss_final_visible_or_empty(raw).unwrap_or(raw).trim().to_string();
     if s.is_empty() {
         return String::new();
     }
@@ -554,7 +726,10 @@ fn sanitize_lukewarm_output(raw: &str) -> String {
     s = s
         .replace("<bullet>", "")
         .replace("<paragraph>", "")
-        .replace("```", "");
+        .replace("```", "")
+        .replace("<|start|>", "")
+        .replace("<|end|>", "")
+        .replace("<|return|>", "");
 
     let lines: Vec<String> = s
         .lines()
@@ -569,19 +744,27 @@ fn sanitize_lukewarm_output(raw: &str) -> String {
 
     let mut bullet: Option<String> = None;
     let mut para_parts = Vec::new();
+    let mut usable_lines = 0usize;
     for line in &lines {
         let normalized = line
             .trim_start_matches(['-', '*', '•', ' '])
             .trim()
             .to_string();
-        if looks_like_lukewarm_scaffolding(&normalized) {
+        if looks_like_lukewarm_scaffolding(&normalized)
+            || looks_like_lukewarm_instruction_echo(&normalized)
+        {
             continue;
         }
+        usable_lines += 1;
         if bullet.is_none() && !normalized.is_empty() {
             bullet = Some(format!("- {normalized}"));
         } else if !normalized.is_empty() {
             para_parts.push(normalized);
         }
+    }
+
+    if usable_lines == 0 {
+        return String::new();
     }
 
     let bullet = bullet.unwrap_or_else(|| "- Recent activity updated.".to_string());
@@ -593,7 +776,29 @@ fn sanitize_lukewarm_output(raw: &str) -> String {
 
     let bullet = clamp_chars(bullet.trim(), 260);
     let para = clamp_chars(para.trim(), 900);
-    format!("{bullet}\n{para}")
+    let out = format!("{bullet}\n{para}");
+    if looks_like_lukewarm_non_summary(&out) {
+        String::new()
+    } else {
+        out
+    }
+}
+
+/// Returns the final channel from a GPT-OSS protocol completion. An analysis
+/// channel without a final channel is explicitly an answerless completion, so
+/// callers must not repurpose the preceding scratch work as user-facing text.
+fn gpt_oss_final_visible_or_empty(raw: &str) -> Option<&str> {
+    let lower = raw.to_ascii_lowercase();
+    const ANALYSIS: &str = "<|channel|>analysis<|message|>";
+    const FINAL: &str = "<|channel|>final<|message|>";
+
+    if let Some(idx) = lower.rfind(FINAL) {
+        Some(&raw[idx + FINAL.len()..])
+    } else if lower.contains(ANALYSIS) {
+        Some("")
+    } else {
+        None
+    }
 }
 
 fn looks_like_lukewarm_scaffolding(line: &str) -> bool {
@@ -611,6 +816,50 @@ fn looks_like_lukewarm_scaffolding(line: &str) -> bool {
     ]
     .iter()
     .any(|pattern| normalized.starts_with(pattern))
+}
+
+fn looks_like_lukewarm_non_summary(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    [
+        "i'm ready to help",
+        "i am ready to help",
+        "could you share",
+        "please share the recent activity",
+        "ask for activity",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+}
+
+fn looks_like_lukewarm_instruction_echo(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    let direct_echoes = [
+        "we need to produce a bullet",
+        "we need to produce one bullet",
+        "we need to produce:",
+        "we need to summarize this chat",
+        "one bullet and one short paragraph",
+        "one bullet point, one paragraph",
+        "the user wants a bullet",
+        "the user wants a paragraph",
+        "summarizing the recent activity",
+        "output format",
+        "the instruction specifies",
+        "single bullet point followed by a paragraph",
+        "this format ensures",
+        "paragraph should be max",
+        "bullet should be concise",
+        "we need to keep it short",
+        "let's count",
+        "that's 30 words",
+    ];
+    direct_echoes.iter().any(|pattern| normalized.contains(pattern))
+        || count_non_overlapping(&normalized, "the user wants") >= 3
+        || count_non_overlapping(&normalized, "we need to") >= 3
+}
+
+fn count_non_overlapping(text: &str, needle: &str) -> usize {
+    text.match_indices(needle).count()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -776,9 +1025,9 @@ impl LukeWarm {
 
     fn push_event(
         &mut self,
-        llama: &Llama,
-        model_path: &Path,
-        cancel: &AtomicBool,
+        _llama: &Llama,
+        _model_path: &Path,
+        _cancel: &AtomicBool,
         ev: &MemoryEvent,
     ) {
         // Estimate tokens as ~4 chars/token (good enough for a rolling window).
@@ -801,13 +1050,13 @@ impl LukeWarm {
                 .saturating_sub((removed.len().max(1) + 3) / 4);
         }
 
-        self.maybe_summarize(llama, model_path, cancel, false);
+        self.maybe_summarize_host(false);
     }
 
     fn push_event_cloud(
         &mut self,
-        client: &dyn CloudProviderAdapter,
-        cancel: &AtomicBool,
+        _client: &dyn CloudProviderAdapter,
+        _cancel: &AtomicBool,
         ev: &MemoryEvent,
     ) {
         let line = format!(
@@ -827,24 +1076,18 @@ impl LukeWarm {
                 .saturating_sub((removed.len().max(1) + 3) / 4);
         }
 
-        self.maybe_summarize_cloud(client, cancel, false);
+        self.maybe_summarize_host(false);
     }
 
-    fn tick(&mut self, llama: &Llama, model_path: &Path, cancel: &AtomicBool) {
-        self.maybe_summarize(llama, model_path, cancel, true);
+    fn tick(&mut self, _llama: &Llama, _model_path: &Path, _cancel: &AtomicBool) {
+        self.maybe_summarize_host(true);
     }
 
-    fn tick_cloud(&mut self, client: &dyn CloudProviderAdapter, cancel: &AtomicBool) {
-        self.maybe_summarize_cloud(client, cancel, true);
+    fn tick_cloud(&mut self, _client: &dyn CloudProviderAdapter, _cancel: &AtomicBool) {
+        self.maybe_summarize_host(true);
     }
 
-    fn maybe_summarize(
-        &mut self,
-        llama: &Llama,
-        model_path: &Path,
-        cancel: &AtomicBool,
-        force_by_time: bool,
-    ) {
+    fn maybe_summarize_host(&mut self, force_by_time: bool) {
         // Periodic update gate (default 30s) so summary stays fresh even if token window isn't full.
         let now = std::time::Instant::now();
         let due_by_time = self
@@ -857,99 +1100,11 @@ impl LukeWarm {
             return;
         }
 
-        let mut prompt = String::new();
-        if !self.summary.trim().is_empty() {
-            prompt.push_str("Existing rolling summary:\n");
-            prompt.push_str(self.summary.trim());
-            prompt.push_str(
-                "\n\nUpdate that summary using the recent activity below. Preserve still-relevant context, drop stale detail, and keep the result compact.\n\n",
-            );
-        }
-        prompt.push_str("Summarize the recent activity below into ONE bullet point and ONE short paragraph (max ~80 words). ");
-        prompt
-            .push_str("Focus on what happened, key decisions, and what is currently in progress. ");
-        prompt.push_str("Do not include more than one bullet.\n\nActivity:\n");
-        for l in &self.buf {
-            prompt.push_str("- ");
-            prompt.push_str(l);
-            prompt.push('\n');
-        }
-        prompt.push_str("\nOutput format:\n- <bullet>\n<paragraph>\n");
-
-        let mut out = String::new();
-        let _ = llama.generate_text_cpu_only(
-            model_path,
-            &prompt,
-            self.cfg.lukewarm_max_tokens,
-            self.cfg.temp,
-            self.cfg.top_p,
-            self.cfg.top_k,
-            cancel,
-            |t| out.push_str(t),
-        );
-        let out = sanitize_lukewarm_output(out.trim());
-        if !out.is_empty() {
-            self.summary = out;
+        if let Some(summary) = build_host_lukewarm_summary(&self.buf) {
+            self.summary = summary;
             self.last_summary_at = Some(now);
             self.prune_buffer_after_success();
             let _ = std::fs::write(&self.summary_path, &self.summary);
-        }
-    }
-
-    fn maybe_summarize_cloud(
-        &mut self,
-        client: &dyn CloudProviderAdapter,
-        cancel: &AtomicBool,
-        force_by_time: bool,
-    ) {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        let now = std::time::Instant::now();
-        let due_by_time = self
-            .last_summary_at
-            .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(30))
-            .unwrap_or(true);
-
-        let due_by_size = self.token_est >= self.cfg.lukewarm_token_window.saturating_sub(200);
-        if !(due_by_size || (force_by_time && due_by_time)) {
-            return;
-        }
-
-        let mut prompt = String::new();
-        if !self.summary.trim().is_empty() {
-            prompt.push_str("Existing rolling summary:\n");
-            prompt.push_str(self.summary.trim());
-            prompt.push_str(
-                "\n\nUpdate that summary using the recent activity below. Preserve still-relevant context, drop stale detail, and keep the result compact.\n\n",
-            );
-        }
-        prompt.push_str("Summarize the recent activity below into ONE bullet point and ONE short paragraph (max ~80 words). ");
-        prompt
-            .push_str("Focus on what happened, key decisions, and what is currently in progress. ");
-        prompt.push_str("Do not include more than one bullet.\n\nActivity:\n");
-        for l in &self.buf {
-            prompt.push_str("- ");
-            prompt.push_str(l);
-            prompt.push('\n');
-        }
-
-        let system =
-            "You are the Bookkeeper for a modular research lab UI. Keep summaries compact and factual.";
-        if let Ok(out) = client.chat_completion(
-            system,
-            &prompt,
-            self.cfg.lukewarm_max_tokens,
-            self.cfg.temp,
-            self.cfg.top_p,
-        ) {
-            let out = sanitize_lukewarm_output(out.trim());
-            if !out.is_empty() {
-                self.summary = out;
-                self.last_summary_at = Some(now);
-                self.prune_buffer_after_success();
-                let _ = std::fs::write(&self.summary_path, &self.summary);
-            }
         }
     }
 
@@ -962,6 +1117,53 @@ impl LukeWarm {
                 .saturating_sub((removed.len().max(1) + 3) / 4);
         }
     }
+}
+
+/// Luke Warm is intentionally host-built.  It is prompt context for the main
+/// chat, so letting a small model summarize its own output creates a feedback
+/// loop where malformed text can be re-injected on every turn.  Preserve only
+/// the most recent user-authored activity and never model prose.
+fn build_host_lukewarm_summary(lines: &[String]) -> Option<String> {
+    let mut items = Vec::new();
+    for line in lines {
+        if !line.starts_with("[user]") {
+            continue;
+        }
+        let Some((_, text)) = line.split_once(") ") else {
+            continue;
+        };
+        let cleaned = text
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if cleaned.is_empty() || items.last().is_some_and(|last: &String| last == &cleaned) {
+            continue;
+        }
+        items.push(cleaned);
+    }
+
+    let latest = items.last()?;
+    let latest = clamp_chars_ellipsis(latest, 260);
+    let earlier = items
+        .iter()
+        .rev()
+        .skip(1)
+        .take(2)
+        .rev()
+        .map(|item| clamp_chars_ellipsis(item, 140))
+        .collect::<Vec<_>>();
+
+    let mut summary = format!("- Recent user activity: {latest}");
+    if earlier.is_empty() {
+        summary.push_str("\nCurrent user activity is recorded in the cold log.");
+    } else {
+        summary.push_str("\nEarlier user activity: ");
+        summary.push_str(&earlier.join(" | "));
+    }
+    Some(summary)
 }
 
 struct Store {
@@ -1263,8 +1465,8 @@ mod tests {
 
     #[test]
     fn lukewarm_sanitizer_keeps_useful_body_text() {
-        let body = "The assistant and user inspected the bookkeeper rolling summary path. "
-            .repeat(8);
+        let body =
+            "The assistant and user inspected the bookkeeper rolling summary path. ".repeat(8);
         let raw = format!(
             "- Bookkeeper rolling summary update investigated.\n{body}Next action is to keep the summary fresh without repeatedly reprocessing the same full buffer."
         );
@@ -1277,6 +1479,127 @@ mod tests {
             sanitized.chars().count() > 500,
             "summary was unexpectedly over-truncated: {sanitized}"
         );
+    }
+
+    #[test]
+    fn host_lukewarm_summary_uses_only_recent_user_activity() {
+        let lines = vec![
+            "[assistant] (-/message) Invented workflow details.".to_string(),
+            "[user] (-/message) Create Project Alpha with a short description.".to_string(),
+            "[assistant] (-/message) More model prose.".to_string(),
+            "[user] (-/message) Track the project in the cold log.".to_string(),
+        ];
+
+        let summary = build_host_lukewarm_summary(&lines).expect("user activity summary");
+
+        assert!(summary.contains("Track the project in the cold log"));
+        assert!(summary.contains("Create Project Alpha"));
+        assert!(!summary.contains("Invented workflow"));
+        assert!(!summary.contains("More model prose"));
+    }
+
+    #[test]
+    fn lukewarm_sanitizer_rejects_incomplete_gpt_oss_protocol_output() {
+        let raw = "We need to ask for activity.<|end|><|start|>assistant<|channel|>analysis<|message|>No activity is available.";
+
+        assert!(sanitize_lukewarm_output(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_sanitizer_keeps_only_gpt_oss_final_channel() {
+        let raw = "Scratch work.<|start|>assistant<|channel|>analysis<|message|>Plan.\
+<|end|><|start|>assistant<|channel|>final<|message|>- Summary refreshed.\nCurrent work remains available.<|end|>";
+
+        assert_eq!(
+            sanitize_lukewarm_output(raw),
+            "- Summary refreshed.\nCurrent work remains available."
+        );
+    }
+
+    #[test]
+    fn lukewarm_sanitizer_rejects_repeated_summary_instruction_echoes() {
+        let raw = "- We need to produce a bullet and a paragraph summarizing the recent activity. \
+The user wants a bullet and a paragraph. The user wants a bullet and a paragraph.";
+
+        assert!(sanitize_lukewarm_output(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_sanitizer_rejects_output_format_echoes() {
+        let raw = "- The output format requires a single bullet point followed by a paragraph. \
+The instruction specifies that the assistant should provide a concise bullet. This format ensures clarity and brevity.";
+
+        assert!(sanitize_lukewarm_output(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_sanitizer_rejects_max_word_count_prompt_echoes() {
+        let raw = "We need to summarize this chat. We need to produce: One bullet point, one paragraph. \
+The paragraph should be max 80 words. The bullet should be concise.";
+
+        assert!(sanitize_lukewarm_output(raw).is_empty());
+    }
+
+    #[test]
+    fn lukewarm_sanitizer_rejects_self_counted_prompt_echoes() {
+        let raw = "We need to keep it short. Let's count: that is 30 words.\n\
+The user wants to know the workflow again.";
+
+        assert!(sanitize_lukewarm_output(raw).is_empty());
+    }
+
+    #[test]
+    fn semantic_sort_json_sanitizer_strips_markdown_fences() {
+        let raw = "```json\n{\"items\":[]}\n```";
+
+        assert_eq!(sanitize_json_candidate(raw), "{\"items\":[]}");
+    }
+
+    #[test]
+    fn semantic_sort_json_sanitizer_extracts_valid_json_from_prose() {
+        let raw = "Here is the JSON:\n{\"items\":[{\"evidence_id\":\"e1\",\"decisions\":[]}]}";
+
+        assert_eq!(
+            sanitize_json_candidate(raw),
+            "{\"items\":[{\"evidence_id\":\"e1\",\"decisions\":[]}]}"
+        );
+    }
+
+    #[test]
+    fn semantic_sort_json_sanitizer_extracts_json_after_gpt_oss_protocol_text() {
+        let raw = concat!(
+            "I should classify this carefully.\n",
+            "<|end|><|start|>assistant<|channel|>final <|constrain|>JSON<|message|>",
+            "{\"items\":[{\"evidence_id\":\"e1\",\"decisions\":[]}]}"
+        );
+
+        assert_eq!(
+            sanitize_json_candidate(raw),
+            "{\"items\":[{\"evidence_id\":\"e1\",\"decisions\":[]}]}"
+        );
+    }
+
+    #[test]
+    fn semantic_sort_json_sanitizer_leaves_invalid_output_visible() {
+        let raw = "I cannot sort this evidence.";
+
+        assert_eq!(sanitize_json_candidate(raw), raw);
+    }
+
+    #[test]
+    fn semantic_sort_required_json_reports_an_empty_model_draft() {
+        let err = sanitize_required_json_candidate(" \n\t ").expect_err("empty draft must fail");
+
+        assert!(err.to_string().contains("no visible structured output"));
+    }
+
+    #[test]
+    fn local_json_draft_prompt_uses_gpt_oss_final_json_channel_only_when_needed() {
+        let plain = "Return JSON only.";
+
+        assert_eq!(local_json_draft_prompt(plain, false), plain);
+        assert!(local_json_draft_prompt(plain, true)
+            .ends_with("<|channel|>final <|constrain|>JSON<|message|>"));
     }
 
     #[test]

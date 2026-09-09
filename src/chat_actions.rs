@@ -65,7 +65,11 @@ pub(super) fn handle_chat_send(ctx: &egui::Context, app: &mut ChattyCogApp) {
         app.broadcast_shared_chat_message("user", "You", &turn.content);
     }
     if app.shared_chat_local_ai_allowed() {
-        if let Some(path) = turn.selected_file.as_ref().filter(|path| path_looks_like_image(path)) {
+        if let Some(path) = turn
+            .selected_file
+            .as_ref()
+            .filter(|path| path_looks_like_image(path))
+        {
             app.start_multimodal_generation(turn.generation_prompt, path.clone());
         } else {
             app.start_generation(turn.generation_prompt);
@@ -143,7 +147,8 @@ fn prepare_outgoing_chat_turn(
     if let Some(path) = selected_file.as_ref() {
         match build_chat_selected_file_prompt(path, app.sandbox_dir.as_deref()) {
             Ok(file_block) => {
-                generation_prompt = format!("{file_block}\n\n### USER REQUEST\n{generation_prompt}");
+                generation_prompt =
+                    format!("{file_block}\n\n### USER REQUEST\n{generation_prompt}");
                 let file_label = format_chat_selected_file_label(path, app.sandbox_dir.as_deref());
                 app.runtime_status = if path_looks_like_image(path) {
                     format!("Runtime: attached image {file_label} for a multimodal turn.")

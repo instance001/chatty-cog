@@ -1005,7 +1005,8 @@ fn render_module_support_panels(
 
             let models_dir = app.models_dir.clone();
             let modules_dir = app.modules_dir.clone();
-            let model_opts = build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
+            let model_opts =
+                build_model_options(app.models_dir.as_deref(), app.modules_dir.as_deref());
             let preferred_model_hint = app
                 .prefs
                 .modules
@@ -1014,7 +1015,8 @@ fn render_module_support_panels(
                 .filter(|s| !s.trim().is_empty())
                 .cloned()
                 .or_else(|| mf.default_model.clone());
-            let preferred_model_path = app.resolve_portable_model_hint(preferred_model_hint.as_deref());
+            let preferred_model_path =
+                app.resolve_portable_model_hint(preferred_model_hint.as_deref());
 
             let st = app
                 .module_ai

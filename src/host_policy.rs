@@ -42,10 +42,10 @@ pub(super) fn workflow_apply_recommendation(
             message: "This target module is not installed here yet. Keep the workflow in the inbox until the module is available.".to_string(),
         };
     };
-    if !app.capability_orchestrator().module_allows_feature(
-        &record.module_id,
-        ModuleNetworkFeature::SharedStateReceive,
-    ) {
+    if !app
+        .capability_orchestrator()
+        .module_allows_feature(&record.module_id, ModuleNetworkFeature::SharedStateReceive)
+    {
         return WorkflowApplyRecommendation {
             can_apply: false,
             tone: egui::Color32::from_rgb(160, 90, 40),
@@ -56,7 +56,9 @@ pub(super) fn workflow_apply_recommendation(
         return WorkflowApplyRecommendation {
             can_apply: false,
             tone: egui::Color32::from_rgb(160, 90, 40),
-            message: format!("This looks stale against the currently applied session state: {reason}"),
+            message: format!(
+                "This looks stale against the currently applied session state: {reason}"
+            ),
         };
     }
     WorkflowApplyRecommendation {

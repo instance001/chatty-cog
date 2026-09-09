@@ -126,8 +126,7 @@ fn cloud_health_checked_label(checked_at_unix_ms: u64) -> Option<String> {
     } else {
         format!("{}d ago", age_secs / 86_400)
     };
-    let stale_suffix = if is_cloud_health_stale_success("Health check passed", checked_at_unix_ms)
-    {
+    let stale_suffix = if is_cloud_health_stale_success("Health check passed", checked_at_unix_ms) {
         " (stale)"
     } else {
         ""
@@ -198,7 +197,9 @@ fn cloud_provider_example_chat_action(
     match kind {
         preferences::CloudProviderKind::OpenAi
         | preferences::CloudProviderKind::Anthropic
-        | preferences::CloudProviderKind::Gemini => Some(CloudModelEditorRepairAction::UseExampleChatModel),
+        | preferences::CloudProviderKind::Gemini => {
+            Some(CloudModelEditorRepairAction::UseExampleChatModel)
+        }
         preferences::CloudProviderKind::OpenAiCompatible => None,
     }
 }
@@ -258,25 +259,17 @@ fn cloud_verification_scope_label(scope: &CloudModelVerificationScope) -> &'stat
     match scope {
         CloudModelVerificationScope::None => "not yet verified",
         CloudModelVerificationScope::ChatOnly => "chat ready only",
-        CloudModelVerificationScope::ChatAndEmbeddings => {
-            "chat + Bookkeeper ready"
-        }
+        CloudModelVerificationScope::ChatAndEmbeddings => "chat + Bookkeeper ready",
     }
 }
 
 fn cloud_bookkeeper_ready_badge(ui: &mut egui::Ui, scope: &CloudModelVerificationScope) {
     match scope {
         CloudModelVerificationScope::ChatAndEmbeddings => {
-            ui.colored_label(
-                egui::Color32::from_rgb(50, 140, 70),
-                "[bookkeeper-ready]",
-            );
+            ui.colored_label(egui::Color32::from_rgb(50, 140, 70), "[bookkeeper-ready]");
         }
         CloudModelVerificationScope::ChatOnly => {
-            ui.colored_label(
-                egui::Color32::from_rgb(150, 130, 80),
-                "[chat-ready]",
-            );
+            ui.colored_label(egui::Color32::from_rgb(150, 130, 80), "[chat-ready]");
         }
         CloudModelVerificationScope::None => {}
     }
@@ -394,6 +387,11 @@ fn render_models_orchestrator_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             }
         });
         ui.add_space(6.0);
+        ui.small(format!(
+            "Reply output cap below is separate from local GGUF context: {} tokens normally; {} only if the runtime falls back to safety mode. llama.cpp's 512-token default is never used.",
+            llama_dyn::LOCAL_CHAT_CONTEXT_TOKENS,
+            llama_dyn::LOCAL_CHAT_SAFE_CONTEXT_TOKENS,
+        ));
         let mut live_changed = false;
         ui.horizontal(|ui| {
             if ui.button("Copy from current").clicked() {
@@ -424,7 +422,7 @@ fn render_models_orchestrator_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         live_changed |= ui
             .add(
                 egui::Slider::new(&mut app.prefs.orchestrator.max_tokens, 1..=4096)
-                    .text("max_tokens"),
+                    .text("Reply output cap (tokens)"),
             )
             .changed();
         if live_changed {
@@ -473,6 +471,10 @@ fn render_models_bookkeeper_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             "Cloud bookkeeper entries should also include an embeddings model name so semantic search can keep working.",
         );
         ui.add_space(6.0);
+        ui.small(format!(
+            "Rolling-summary output cap below is separate from the local Bookkeeper context: {} tokens. Structured semantic and atlas drafts use their own evidence-sized output budget (512–4096 tokens). llama.cpp's 512-token context default is never used.",
+            llama_dyn::LOCAL_BOOKKEEPER_CONTEXT_TOKENS,
+        ));
         add_presets_bookkeeper(ui, app);
         let mut changed = false;
         changed |= ui
@@ -485,7 +487,10 @@ fn render_models_bookkeeper_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             .add(egui::Slider::new(&mut app.bookkeeper_top_k, 0..=200).text("top_k"))
             .changed();
         changed |= ui
-            .add(egui::Slider::new(&mut app.bookkeeper_max_tokens, 1..=4096).text("max_tokens"))
+            .add(
+                egui::Slider::new(&mut app.bookkeeper_max_tokens, 1..=4096)
+                    .text("Rolling-summary output cap (tokens)"),
+            )
             .changed();
         if changed {
             app.prefs.bookkeeper = GenParams {
@@ -1074,7 +1079,11 @@ fn render_models_module_prefs(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
                 let selected_label = selected_model_option_label(
                     &model_opts,
                     entry.preferred_model.as_deref(),
-                    if selected.is_empty() { None } else { Some(selected.clone()) },
+                    if selected.is_empty() {
+                        None
+                    } else {
+                        Some(selected.clone())
+                    },
                 );
 
                 if let Some(picked) = show_grouped_model_option_combo(

@@ -99,11 +99,7 @@ impl HostCapabilityOrchestrator {
         self.modules.get(*index)
     }
 
-    pub fn module_allows_feature(
-        &self,
-        module_id: &str,
-        feature: ModuleNetworkFeature,
-    ) -> bool {
+    pub fn module_allows_feature(&self, module_id: &str, feature: ModuleNetworkFeature) -> bool {
         self.module(module_id)
             .map(|module| module.features.contains(&feature))
             .unwrap_or(false)
@@ -181,12 +177,8 @@ impl HostCapabilityOrchestrator {
         let Some(module) = self.module(module_id) else {
             return None;
         };
-        let lanes = self.ranked_receive_asset_lanes_for_module(
-            module_id,
-            kind,
-            content_type,
-            byte_len,
-        );
+        let lanes =
+            self.ranked_receive_asset_lanes_for_module(module_id, kind, content_type, byte_len);
         let first = lanes.first()?.clone();
         let first_rank = rank_asset_lane(module.host_authoritative, &first);
         if lanes
@@ -373,10 +365,7 @@ fn push_feature_lane(
     });
 }
 
-fn rank_asset_lane(
-    host_authoritative: bool,
-    lane: &ModuleNetworkAssetLane,
-) -> AssetLaneRankKey {
+fn rank_asset_lane(host_authoritative: bool, lane: &ModuleNetworkAssetLane) -> AssetLaneRankKey {
     AssetLaneRankKey {
         authority_rank: if host_authoritative { 0 } else { 1 },
         delivery_rank: match lane.delivery_mode {

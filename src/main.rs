@@ -33,6 +33,48 @@ use chattycog_gui::llama_dyn;
 use chattycog_gui::memory::bookkeeper::{
     BookkeeperConfig, BookkeeperHandle, EventCategory, MemoryEvent, MemoryHit, MemoryKind,
 };
+use chattycog_gui::memory::cold_atlas::{
+    ColdAtlasLineageLink, ColdAtlasPaths, ColdAtlasQuery, ColdAtlasRecord, ColdAtlasRecordStatus,
+    PreparedColdAtlasRun, apply_cold_atlas_status_change_to_store,
+    cold_atlas_json_matches_reviewed, cold_atlas_lineage_links,
+    commit_prepared_cold_atlas_revision_to_store, commit_prepared_cold_atlas_run,
+    commit_prepared_cold_atlas_supersede_to_store, prepare_cold_atlas_revision_run,
+    prepare_cold_atlas_run, prepare_cold_atlas_supersede_run, query_cold_atlas_store,
+    read_cold_atlas_receipts_jsonl, read_cold_atlas_records_jsonl,
+    render_cold_atlas_lineage_overview, render_cold_atlas_overview,
+    render_cold_atlas_query_preview, render_cold_atlas_receipts_overview,
+    render_cold_atlas_record_draft_json, render_cold_atlas_replacement_draft_json,
+    render_cold_atlas_review_preview, render_cold_atlas_revision_preview,
+    render_cold_atlas_supersede_preview,
+};
+use chattycog_gui::memory::governor::{
+    ColdMemoryAttachment, ColdMemoryCandidate, ColdMemoryCandidateFeedback, ColdMemoryQuery,
+    ColdMemoryRecallLane, ColdMemoryRecallOutcome, ColdMemoryRecallTrace,
+    append_memory_attachment_receipt_to_store, append_memory_feedback_receipt_to_store,
+    append_memory_recall_receipt_to_store, hydrate_atlas_cold_hits, hydrate_cold_evidence_ref,
+    hydrate_semantic_cold_hits, query_cold_memory, read_memory_attachment_receipts_jsonl,
+    read_memory_feedback_receipts_jsonl, read_memory_recall_receipts_jsonl,
+    remember_attachment_receipts_path, remember_feedback_receipts_path,
+    remember_recall_receipts_path, render_host_selected_cold_context_attachment,
+    render_memory_feedback_receipts_overview, render_memory_remember_session_receipts_overview,
+    render_recall_route_preview, summarize_prior_feedback_for_candidate,
+};
+use chattycog_gui::memory::semantic_index::{
+    ColdBucketPlacement, ColdBucketSiftProposal, ColdSemanticBucketMap, ColdSemanticIndexPaths,
+    ColdSemanticQuery, append_sift_proposal_jsonl, apply_placement_review_decisions_to_store,
+    apply_selected_sift_changes_to_store, build_bucket_sift_proposal_with_feedback,
+    create_default_interaction_bucket_map_if_missing, filter_semantic_review_placements,
+    query_semantic_index_store, read_bucket_map_json, read_placement_review_receipts_jsonl,
+    read_placements_jsonl, read_sift_receipts_jsonl, read_sort_receipts_jsonl,
+    render_semantic_bucket_placement_overview, render_semantic_query_preview,
+    render_semantic_receipts_overview, semantic_review_queue_placements,
+};
+use chattycog_gui::memory::semantic_sorter::{
+    HOST_SEMANTIC_SORT_MAX_EVIDENCE_PER_DRAFT, HOST_SEMANTIC_SORT_OUTPUT_TOKENS,
+    PreparedSemanticSortRun, commit_prepared_semantic_sort_run, prepare_semantic_sort_run,
+    render_semantic_sort_review_preview, semantic_sort_json_matches_reviewed,
+    skip_prepared_semantic_sort_run,
+};
 use chattycog_gui::module_bridge::{
     ModuleBridgeIncomingAssetRecord, ModuleBridgeIncomingSharedState, ModuleBridgeLogExcerpt,
     ModuleBridgeRoomEvent, ModuleBridgeSharedRoomEvents, ModuleBridgeSharedRoomParticipant,
@@ -111,7 +153,10 @@ fn run_cloud_model_health_check(entry: CloudModelEntry) -> String {
     ) {
         Ok(reply) => reply,
         Err(err) => {
-            return format!("Health check failed for '{}': chat test failed: {err}", display_name);
+            return format!(
+                "Health check failed for '{}': chat test failed: {err}",
+                display_name
+            );
         }
     };
 
@@ -160,10 +205,7 @@ fn run_cloud_model_health_check(entry: CloudModelEntry) -> String {
 
 const CLOUD_HEALTH_STALE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
-fn is_cloud_health_stale_success(
-    status: impl AsRef<str>,
-    checked_at_unix_ms: u64,
-) -> bool {
+fn is_cloud_health_stale_success(status: impl AsRef<str>, checked_at_unix_ms: u64) -> bool {
     if checked_at_unix_ms == 0 {
         return false;
     }
@@ -201,7 +243,10 @@ fn cloud_model_repair_hint(
         (preferences::CloudProviderKind::Gemini, CloudModelEditorFocusField::EmbeddingsModel) => {
             "Gemini Bookkeeper support needs an embeddings model name too. A common setup here is `gemini-embedding-2-preview`."
         }
-        (preferences::CloudProviderKind::Anthropic, CloudModelEditorFocusField::EmbeddingsModel) => {
+        (
+            preferences::CloudProviderKind::Anthropic,
+            CloudModelEditorFocusField::EmbeddingsModel,
+        ) => {
             "Anthropic embeddings are not exposed by the current ChattyCog adapter, so this lane will not satisfy Bookkeeper yet."
         }
         (preferences::CloudProviderKind::Anthropic, CloudModelEditorFocusField::BaseUrl) => {
@@ -239,13 +284,12 @@ fn cloud_model_repair_action(
             CloudModelEditorRepairAction::RestoreProviderDefaultBaseUrl,
             "Restore provider default base URL",
         )),
-        (
-            preferences::CloudProviderKind::Gemini,
-            CloudModelEditorFocusField::EmbeddingsModel,
-        ) => Some((
-            CloudModelEditorRepairAction::UseGeminiDefaultEmbeddingsModel,
-            "Use Gemini embeddings default",
-        )),
+        (preferences::CloudProviderKind::Gemini, CloudModelEditorFocusField::EmbeddingsModel) => {
+            Some((
+                CloudModelEditorRepairAction::UseGeminiDefaultEmbeddingsModel,
+                "Use Gemini embeddings default",
+            ))
+        }
         _ => None,
     }
 }
@@ -1554,6 +1598,51 @@ struct ChattyCogApp {
     logs_new_tags: String,
     logs_new_summary: String,
     logs_new_payload_json: String,
+    semantic_sort_max_items: usize,
+    semantic_sort_prepared: Option<PreparedSemanticSortRun>,
+    semantic_sort_output_json: String,
+    semantic_sort_status: String,
+    semantic_bucket_map_view: String,
+    semantic_sort_draft_rx: Option<Receiver<Result<String, String>>>,
+    semantic_sort_review_preview: String,
+    semantic_sort_reviewed_json: String,
+    semantic_sort_skip_reason: String,
+    semantic_bucket_placement_view: String,
+    semantic_query_preview_text: String,
+    semantic_query_preview_include_misc: bool,
+    semantic_query_preview: String,
+    recall_route_preview_text: String,
+    recall_route_preview_include_misc: bool,
+    recall_route_preview_include_superseded: bool,
+    recall_route_preview: String,
+    semantic_review_bucket_map: Option<ColdSemanticBucketMap>,
+    semantic_review_proposed: Vec<ColdBucketPlacement>,
+    semantic_review_bucket_filter: String,
+    semantic_review_fit_filter: String,
+    semantic_review_approve_ids: HashSet<String>,
+    semantic_review_reject_ids: HashSet<String>,
+    semantic_review_inspections: HashMap<String, String>,
+    cold_atlas_max_items: usize,
+    cold_atlas_prepared: Option<PreparedColdAtlasRun>,
+    cold_atlas_draft_rx: Option<Receiver<Result<String, String>>>,
+    cold_atlas_output_json: String,
+    cold_atlas_review_preview: String,
+    cold_atlas_reviewed_json: String,
+    cold_atlas_records: Vec<ColdAtlasRecord>,
+    cold_atlas_inspections: HashMap<String, String>,
+    cold_atlas_revision_target_id: Option<String>,
+    cold_atlas_supersede_target_id: Option<String>,
+    cold_atlas_lineage_links: Vec<ColdAtlasLineageLink>,
+    cold_atlas_lineage_view: String,
+    cold_atlas_query_text: String,
+    cold_atlas_query_include_superseded: bool,
+    cold_atlas_query_preview: String,
+    cold_atlas_view: String,
+    semantic_receipts_view: String,
+    semantic_receipts_filter: String,
+    semantic_sift_bucket_id: String,
+    semantic_sift_proposal: Option<ColdBucketSiftProposal>,
+    semantic_sift_inspections: HashMap<String, String>,
     bookkeeper_model_path: Option<PathBuf>,
     bookkeeper_temp: f32,
     bookkeeper_top_p: f32,
@@ -1563,6 +1652,16 @@ struct ChattyCogApp {
     lukewarm_summary: String,
     lukewarm_poll_due: Option<Instant>,
     lukewarm_rx: Option<Receiver<String>>,
+    remember_candidates: Vec<ColdMemoryCandidate>,
+    remember_selected_ids: HashSet<String>,
+    remember_expanded_ids: HashSet<String>,
+    remember_feedback_marked: HashSet<String>,
+    remember_prior_feedback: HashMap<String, String>,
+    remember_status: String,
+    remember_last_query: String,
+    remember_recall_id: Option<String>,
+    remember_recall_seq: u64,
+    remember_attached_context: Option<ColdMemoryAttachment>,
     cloud_model_editor: CloudModelEditorState,
     cloud_model_health_statuses: HashMap<String, String>,
     cloud_model_health_rx: Option<Receiver<(String, String)>>,
@@ -1750,6 +1849,51 @@ impl ChattyCogApp {
             logs_new_tags: String::new(),
             logs_new_summary: String::new(),
             logs_new_payload_json: String::new(),
+            semantic_sort_max_items: 8,
+            semantic_sort_prepared: None,
+            semantic_sort_output_json: String::new(),
+            semantic_sort_status: String::new(),
+            semantic_bucket_map_view: String::new(),
+            semantic_sort_draft_rx: None,
+            semantic_sort_review_preview: String::new(),
+            semantic_sort_reviewed_json: String::new(),
+            semantic_sort_skip_reason: String::new(),
+            semantic_bucket_placement_view: String::new(),
+            semantic_query_preview_text: String::new(),
+            semantic_query_preview_include_misc: true,
+            semantic_query_preview: String::new(),
+            recall_route_preview_text: String::new(),
+            recall_route_preview_include_misc: true,
+            recall_route_preview_include_superseded: false,
+            recall_route_preview: String::new(),
+            semantic_review_bucket_map: None,
+            semantic_review_proposed: Vec::new(),
+            semantic_review_bucket_filter: String::new(),
+            semantic_review_fit_filter: String::new(),
+            semantic_review_approve_ids: HashSet::new(),
+            semantic_review_reject_ids: HashSet::new(),
+            semantic_review_inspections: HashMap::new(),
+            cold_atlas_max_items: 12,
+            cold_atlas_prepared: None,
+            cold_atlas_draft_rx: None,
+            cold_atlas_output_json: String::new(),
+            cold_atlas_review_preview: String::new(),
+            cold_atlas_reviewed_json: String::new(),
+            cold_atlas_records: Vec::new(),
+            cold_atlas_inspections: HashMap::new(),
+            cold_atlas_revision_target_id: None,
+            cold_atlas_supersede_target_id: None,
+            cold_atlas_lineage_links: Vec::new(),
+            cold_atlas_lineage_view: String::new(),
+            cold_atlas_query_text: String::new(),
+            cold_atlas_query_include_superseded: false,
+            cold_atlas_query_preview: String::new(),
+            cold_atlas_view: String::new(),
+            semantic_receipts_view: String::new(),
+            semantic_receipts_filter: String::new(),
+            semantic_sift_bucket_id: String::new(),
+            semantic_sift_proposal: None,
+            semantic_sift_inspections: HashMap::new(),
             bookkeeper_model_path: pick_default_bookkeeper_model(&find_models_dir()),
             bookkeeper: None,
             bookkeeper_temp: 0.2,
@@ -1761,6 +1905,16 @@ impl ChattyCogApp {
                 .unwrap_or_default(),
             lukewarm_poll_due: Some(Instant::now()),
             lukewarm_rx: None,
+            remember_candidates: Vec::new(),
+            remember_selected_ids: HashSet::new(),
+            remember_expanded_ids: HashSet::new(),
+            remember_feedback_marked: HashSet::new(),
+            remember_prior_feedback: HashMap::new(),
+            remember_status: String::new(),
+            remember_last_query: String::new(),
+            remember_recall_id: None,
+            remember_recall_seq: 0,
+            remember_attached_context: None,
             cloud_model_editor: CloudModelEditorState::default(),
             cloud_model_health_statuses: prefs
                 .cloud_models
@@ -4385,7 +4539,10 @@ impl ChattyCogApp {
         &self,
         manifest: &ModuleManifest,
     ) -> Option<ModuleBridgeSharedRoomState> {
-        let module_caps = self.capability_orchestrator().module(&manifest.module_id)?.clone();
+        let module_caps = self
+            .capability_orchestrator()
+            .module(&manifest.module_id)?
+            .clone();
         if !module_caps.room_aware && !module_caps.multiplayer {
             return None;
         }
@@ -4944,20 +5101,17 @@ impl ChattyCogApp {
     }
 
     fn current_orchestrator_selection(&self) -> Option<String> {
-        self.prefs
-            .orchestrator_model_selection
-            .clone()
-            .or_else(|| self.portable_model_hint(self.gguf_path.as_deref()).map(local_selection_id))
+        self.prefs.orchestrator_model_selection.clone().or_else(|| {
+            self.portable_model_hint(self.gguf_path.as_deref())
+                .map(local_selection_id)
+        })
     }
 
     fn current_bookkeeper_selection(&self) -> Option<String> {
-        self.prefs
-            .bookkeeper_model_selection
-            .clone()
-            .or_else(|| {
-                self.portable_model_hint(self.bookkeeper_model_path.as_deref())
-                    .map(local_selection_id)
-            })
+        self.prefs.bookkeeper_model_selection.clone().or_else(|| {
+            self.portable_model_hint(self.bookkeeper_model_path.as_deref())
+                .map(local_selection_id)
+        })
     }
 
     fn resolve_model_selection(
@@ -5021,28 +5175,26 @@ impl ChattyCogApp {
                 format!("Runtime: selected model {label} [{architecture}]{readiness}")
             }
             Ok(None) => format!("Runtime: selected model {label}"),
-            Err(err) => format!(
-                "Runtime: selected model {label} (could not read GGUF metadata: {err})"
-            ),
+            Err(err) => {
+                format!("Runtime: selected model {label} (could not read GGUF metadata: {err})")
+            }
         };
     }
 
     fn set_bookkeeper_model_selection(&mut self, selection: Option<String>) {
         self.prefs.bookkeeper_model_selection = selection.clone();
-        self.bookkeeper_model_path = match self.resolve_model_selection(
-            selection.as_deref(),
-            ModelLane::Bookkeeper,
-        ) {
-            Some(ResolvedModelTarget::Local { selection, path }) => {
-                self.prefs.bookkeeper_model_selection = Some(selection);
-                Some(path)
-            }
-            Some(ResolvedModelTarget::Cloud { selection, .. }) => {
-                self.prefs.bookkeeper_model_selection = Some(selection);
-                None
-            }
-            None => None,
-        };
+        self.bookkeeper_model_path =
+            match self.resolve_model_selection(selection.as_deref(), ModelLane::Bookkeeper) {
+                Some(ResolvedModelTarget::Local { selection, path }) => {
+                    self.prefs.bookkeeper_model_selection = Some(selection);
+                    Some(path)
+                }
+                Some(ResolvedModelTarget::Cloud { selection, .. }) => {
+                    self.prefs.bookkeeper_model_selection = Some(selection);
+                    None
+                }
+                None => None,
+            };
         self.bookkeeper_restart_due = Some(Instant::now() + Duration::from_millis(300));
         self.save_prefs_quietly();
     }
@@ -5139,7 +5291,8 @@ impl ChattyCogApp {
                     "gemini-embedding-2-preview".to_string();
                 self.cloud_model_editor.pending_focus =
                     Some(CloudModelEditorFocusField::EmbeddingsModel);
-                self.prefs_status = "Filled the Gemini embeddings model with a common default.".to_string();
+                self.prefs_status =
+                    "Filled the Gemini embeddings model with a common default.".to_string();
             }
             Some(CloudModelEditorRepairAction::UseExampleChatModel) => {
                 self.cloud_model_editor.model_name = match self.cloud_model_editor.provider_kind {
@@ -5151,22 +5304,23 @@ impl ChattyCogApp {
                     }
                 };
                 self.cloud_model_editor.pending_focus = Some(CloudModelEditorFocusField::ChatModel);
-                self.prefs_status = "Filled the chat model with the provider example value.".to_string();
+                self.prefs_status =
+                    "Filled the chat model with the provider example value.".to_string();
             }
             Some(CloudModelEditorRepairAction::UseExampleEmbeddingsModel) => {
-                self.cloud_model_editor.embedding_model_name =
-                    match self.cloud_model_editor.provider_kind {
-                        preferences::CloudProviderKind::OpenAi => {
-                            "text-embedding-3-small".to_string()
-                        }
-                        preferences::CloudProviderKind::Gemini => {
-                            "gemini-embedding-2-preview".to_string()
-                        }
-                        preferences::CloudProviderKind::Anthropic => String::new(),
-                        preferences::CloudProviderKind::OpenAiCompatible => {
-                            self.cloud_model_editor.embedding_model_name.clone()
-                        }
-                    };
+                self.cloud_model_editor.embedding_model_name = match self
+                    .cloud_model_editor
+                    .provider_kind
+                {
+                    preferences::CloudProviderKind::OpenAi => "text-embedding-3-small".to_string(),
+                    preferences::CloudProviderKind::Gemini => {
+                        "gemini-embedding-2-preview".to_string()
+                    }
+                    preferences::CloudProviderKind::Anthropic => String::new(),
+                    preferences::CloudProviderKind::OpenAiCompatible => {
+                        self.cloud_model_editor.embedding_model_name.clone()
+                    }
+                };
                 self.cloud_model_editor.pending_focus =
                     Some(CloudModelEditorFocusField::EmbeddingsModel);
                 self.prefs_status =
@@ -5185,8 +5339,7 @@ impl ChattyCogApp {
                         .clone();
                     self.cloud_model_editor.pending_focus =
                         Some(CloudModelEditorFocusField::ChatModel);
-                    self.prefs_status =
-                        "Restored the last verified chat model value.".to_string();
+                    self.prefs_status = "Restored the last verified chat model value.".to_string();
                 }
             }
             Some(CloudModelEditorRepairAction::UseLastVerifiedEmbeddingsModel) => {
@@ -5235,11 +5388,10 @@ impl ChattyCogApp {
             anyhow::bail!("API key is required.");
         }
 
-        let id = self
-            .cloud_model_editor
-            .edit_id
-            .clone()
-            .unwrap_or_else(|| format!("cloud_{}", slugify_filename(&display_name, "cloud_model")));
+        let id =
+            self.cloud_model_editor.edit_id.clone().unwrap_or_else(|| {
+                format!("cloud_{}", slugify_filename(&display_name, "cloud_model"))
+            });
         Ok(CloudModelEntry {
             id: id.clone(),
             display_name,
@@ -5261,8 +5413,7 @@ impl ChattyCogApp {
         let entry = match self.build_cloud_model_entry_from_editor() {
             Ok(entry) => entry,
             Err(err) => {
-                self.cloud_model_editor.health_status =
-                    format!("Health check setup failed: {err}");
+                self.cloud_model_editor.health_status = format!("Health check setup failed: {err}");
                 self.cloud_model_editor.health_check_rx = None;
                 self.cloud_model_editor.health_check_running = false;
                 return;
@@ -5417,7 +5568,12 @@ impl ChattyCogApp {
         let mut entry = self.build_cloud_model_entry_from_editor()?;
         let id = entry.id.clone();
 
-        if let Some(existing) = self.prefs.cloud_models.iter_mut().find(|item| item.id == id) {
+        if let Some(existing) = self
+            .prefs
+            .cloud_models
+            .iter_mut()
+            .find(|item| item.id == id)
+        {
             entry.last_health_status = existing.last_health_status.clone();
             entry.last_health_checked_at_unix_ms = existing.last_health_checked_at_unix_ms;
             entry.last_verified_chat_model_name = existing.last_verified_chat_model_name.clone();
@@ -5427,9 +5583,11 @@ impl ChattyCogApp {
             *existing = entry;
         } else {
             self.prefs.cloud_models.push(entry);
-            self.prefs
-                .cloud_models
-                .sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+            self.prefs.cloud_models.sort_by(|a, b| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            });
         }
         self.save_prefs_quietly();
         Ok(())
@@ -5986,7 +6144,10 @@ impl ChattyCogApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(recommendation.can_apply, egui::Button::new("Apply workflow now"))
+                            .add_enabled(
+                                recommendation.can_apply,
+                                egui::Button::new("Apply workflow now"),
+                            )
                             .clicked()
                         {
                             if let Err(err) = self.accept_received_workflow_state(&path) {
@@ -6009,7 +6170,8 @@ impl ChattyCogApp {
                         ui.add_space(8.0);
                         ui.label(egui::RichText::new("Payload preview").strong());
                         let mut payload =
-                            serde_json::to_string_pretty(&record.shared_state.payload).unwrap_or_default();
+                            serde_json::to_string_pretty(&record.shared_state.payload)
+                                .unwrap_or_default();
                         egui::ScrollArea::vertical()
                             .id_salt((heading, "workflow_inbox_payload"))
                             .max_height(180.0)
@@ -7242,7 +7404,10 @@ impl ChattyCogApp {
                 }
                 Some(ResolvedModelTarget::Cloud { target, .. }) => {
                     self.set_active_chat_model_selection(Some(selection.clone()));
-                    notes.push(format!("orchestrator cloud model -> {}", target.display_name));
+                    notes.push(format!(
+                        "orchestrator cloud model -> {}",
+                        target.display_name
+                    ));
                 }
                 None => notes.push(format!("orchestrator model missing locally ({selection})")),
             }
@@ -7976,6 +8141,7 @@ impl ChattyCogApp {
             None => "(no model selected)".to_string(),
         };
         let system = self.build_generation_system_prompt(&prompt, &model_label);
+        self.remember_attached_context = None;
         let target_for_thread = target.clone();
 
         std::thread::spawn(move || {
@@ -8014,7 +8180,8 @@ impl ChattyCogApp {
             }
             if gguf.is_none() {
                 let _ = tx.send(GenEvent::Error(
-                    "No local model selected. Choose a local GGUF or optional cloud entry.".to_string(),
+                    "No local model selected. Choose a local GGUF or optional cloud entry."
+                        .to_string(),
                 ));
                 let _ = tx.send(GenEvent::Done);
                 return;
@@ -8071,6 +8238,1743 @@ impl ChattyCogApp {
         self.scroll_to_bottom = true;
     }
 
+    fn remember_current_input(&mut self) {
+        let query_text = self.composer.trim().to_string();
+        if query_text.is_empty() {
+            self.remember_status =
+                "Type what you want to find in past chat first. Searching will not send it or use history in your next message."
+                    .to_string();
+            return;
+        }
+
+        let query = ColdMemoryQuery::remember_current_input(query_text.clone());
+        let recall_id = self.next_remember_recall_id();
+        let mut semantic_status = None;
+        let mut atlas_status = None;
+        let atlas_candidates = if let Some(logs_dir) = self.logs_dir.as_deref() {
+            let atlas_paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+            let atlas_query = ColdAtlasQuery::remember_current_input(query_text.clone());
+            match query_cold_atlas_store(&atlas_paths, &atlas_query)
+                .and_then(|hits| hydrate_atlas_cold_hits(Some(logs_dir), &query, &hits))
+            {
+                Ok(candidates) => candidates,
+                Err(err) => {
+                    atlas_status = Some(format!(" Cold atlas lookup skipped: {err:#}"));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let semantic_candidates = if let Some(logs_dir) = self.logs_dir.as_deref() {
+            let semantic_paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+            let semantic_query = ColdSemanticQuery::remember_current_input(query_text.clone());
+            match query_semantic_index_store(&semantic_paths, &semantic_query)
+                .and_then(|hits| hydrate_semantic_cold_hits(Some(logs_dir), &query, &hits))
+            {
+                Ok(candidates) => candidates,
+                Err(err) => {
+                    semantic_status = Some(format!(" Semantic bucket lookup skipped: {err:#}"));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let ranked_hits = self
+            .bookkeeper
+            .as_ref()
+            .and_then(|bk| {
+                bk.search(query_text.clone(), None, None, query.max_candidates * 3)
+                    .ok()
+            })
+            .unwrap_or_default();
+
+        match query_cold_memory(self.logs_dir.as_deref(), &query, &ranked_hits) {
+            Ok(cold_candidates) => {
+                self.remember_last_query = query_text;
+                self.remember_recall_id = Some(recall_id.clone());
+                self.remember_selected_ids.clear();
+                self.remember_expanded_ids.clear();
+                self.remember_feedback_marked.clear();
+                self.remember_prior_feedback.clear();
+                self.remember_candidates = merge_remember_candidates(
+                    atlas_candidates,
+                    semantic_candidates,
+                    cold_candidates,
+                    query.max_candidates,
+                );
+                self.refresh_remember_prior_feedback();
+                self.remember_status = if self.remember_candidates.is_empty() {
+                    "No matching past-chat exchanges found. Nothing will be used with your next message."
+                        .to_string()
+                } else if self
+                    .remember_candidates
+                    .iter()
+                    .any(|candidate| candidate.id.starts_with("atlas:"))
+                {
+                    format!(
+                        "Found {} past-chat result(s), including cold-atlas matches. Tick only the excerpts you want to use with your next message.",
+                        self.remember_candidates.len()
+                    )
+                } else if self
+                    .remember_candidates
+                    .iter()
+                    .any(|candidate| candidate.id.starts_with("semantic:"))
+                {
+                    format!(
+                        "Found {} past-chat result(s), including semantic-bucket matches. Tick only the excerpts you want to use with your next message.",
+                        self.remember_candidates.len()
+                    )
+                } else if ranked_hits.is_empty() {
+                    format!(
+                        "Found {} past-chat result(s) with keyword matching. They will not be used unless you select them.",
+                        self.remember_candidates.len()
+                    )
+                } else {
+                    format!(
+                        "Found {} past-chat result(s). Tick only the excerpts you want to use with your next message.",
+                        self.remember_candidates.len()
+                    )
+                };
+                if let Some(note) = atlas_status {
+                    self.remember_status.push_str(&note);
+                }
+                if let Some(note) = semantic_status {
+                    self.remember_status.push_str(&note);
+                }
+                if let Some(logs_dir) = self.logs_dir.as_deref() {
+                    match append_memory_recall_receipt_to_store(
+                        logs_dir,
+                        recall_id.clone(),
+                        self.remember_last_query.clone(),
+                        now_unix_ms(),
+                        ColdMemoryRecallOutcome::Searched,
+                        &self.remember_candidates,
+                        &HashSet::new(),
+                    ) {
+                        Ok(_) => {}
+                        Err(err) => self
+                            .remember_status
+                            .push_str(&format!(" Recall receipt write failed: {err:#}.")),
+                    }
+                }
+            }
+            Err(err) => {
+                self.remember_candidates.clear();
+                self.remember_selected_ids.clear();
+                self.remember_expanded_ids.clear();
+                self.remember_feedback_marked.clear();
+                self.remember_prior_feedback.clear();
+                self.remember_recall_id = None;
+                self.remember_status = format!("Remember search failed: {err:#}");
+            }
+        }
+    }
+
+    fn refresh_remember_prior_feedback(&mut self) {
+        self.remember_prior_feedback.clear();
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            return;
+        };
+        let Ok(receipts) =
+            read_memory_feedback_receipts_jsonl(remember_feedback_receipts_path(logs_dir))
+        else {
+            return;
+        };
+        for candidate in &self.remember_candidates {
+            if let Some(summary) = summarize_prior_feedback_for_candidate(candidate, &receipts) {
+                self.remember_prior_feedback
+                    .insert(candidate.id.clone(), summary);
+            }
+        }
+    }
+
+    fn mark_remember_candidate_feedback(
+        &mut self,
+        candidate_id: &str,
+        feedback: ColdMemoryCandidateFeedback,
+    ) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.remember_status = "Remember feedback needs a memory folder.".to_string();
+            return;
+        };
+        let Some(candidate) = self
+            .remember_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .cloned()
+        else {
+            self.remember_status =
+                "Remember feedback needs an active candidate result.".to_string();
+            return;
+        };
+
+        match append_memory_feedback_receipt_to_store(
+            logs_dir,
+            self.remember_recall_id.clone(),
+            self.remember_last_query.clone(),
+            now_unix_ms(),
+            feedback,
+            &candidate,
+        ) {
+            Ok(_) => {
+                self.remember_feedback_marked.insert(format!(
+                    "{}:{}",
+                    candidate.id,
+                    feedback.as_str()
+                ));
+                self.refresh_remember_prior_feedback();
+                self.remember_status = format!(
+                    "Marked Remember result '{}' as {}. Feedback receipt recorded without changing memory.",
+                    truncate_for_ui(&candidate.title, 80),
+                    feedback.display_label()
+                );
+            }
+            Err(err) => {
+                self.remember_status = format!("Remember feedback write failed: {err:#}");
+            }
+        }
+    }
+
+    fn attach_selected_remember_context(&mut self) {
+        let mut attachment = ColdMemoryAttachment::from_selected_ids(
+            self.remember_last_query.clone(),
+            now_unix_ms(),
+            &self.remember_candidates,
+            &self.remember_selected_ids,
+        );
+        if attachment.is_none() {
+            self.remember_status =
+                "No past chat was selected. Nothing will be used with your next message.".to_string();
+            self.remember_attached_context = None;
+            return;
+        }
+        let active_recall_id = match &self.remember_recall_id {
+            Some(recall_id) => recall_id.clone(),
+            None => self.next_remember_recall_id(),
+        };
+        if let Some(attachment) = &mut attachment {
+            attachment.recall_id = Some(active_recall_id.clone());
+        }
+
+        self.remember_attached_context = attachment;
+        let recall_receipt_status = match (
+            self.logs_dir.as_deref(),
+            self.remember_attached_context.as_ref(),
+        ) {
+            (Some(logs_dir), Some(attachment)) => {
+                let selected_ids = attachment
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.id.clone())
+                    .collect::<HashSet<_>>();
+                match append_memory_recall_receipt_to_store(
+                    logs_dir,
+                    active_recall_id.clone(),
+                    attachment.query.clone(),
+                    now_unix_ms(),
+                    ColdMemoryRecallOutcome::AttachedSelected,
+                    &attachment.candidates,
+                    &selected_ids,
+                ) {
+                    Ok(_) => String::new(),
+                    Err(err) => format!(" Recall receipt write failed: {err:#}."),
+                }
+            }
+            _ => String::new(),
+        };
+        let receipt_status = match (
+            self.logs_dir.as_deref(),
+            self.remember_attached_context.as_ref(),
+        ) {
+            (Some(logs_dir), Some(attachment)) => {
+                match append_memory_attachment_receipt_to_store(logs_dir, attachment) {
+                    Ok(receipt) => {
+                        format!(
+                            " Receipt recorded for {} block(s).",
+                            receipt.candidate_count
+                        )
+                    }
+                    Err(err) => format!(" Receipt write failed: {err:#}."),
+                }
+            }
+            (None, _) => " No memory folder is configured for an attachment receipt.".to_string(),
+            _ => String::new(),
+        };
+        self.remember_status = format!(
+            "Selected {} historical excerpt(s) for your next message only. They will be cleared immediately after that send.{}{}",
+            self.remember_attached_context
+                .as_ref()
+                .map(|receipt| receipt.candidates.len())
+                .unwrap_or(0),
+            receipt_status,
+            recall_receipt_status
+        );
+        self.remember_candidates.clear();
+        self.remember_selected_ids.clear();
+        self.remember_expanded_ids.clear();
+        self.remember_feedback_marked.clear();
+        self.remember_prior_feedback.clear();
+        self.remember_recall_id = None;
+    }
+
+    fn cancel_remember_results(&mut self) {
+        let mut receipt_status = String::new();
+        let recall_id = match &self.remember_recall_id {
+            Some(recall_id) => recall_id.clone(),
+            None => self.next_remember_recall_id(),
+        };
+        if let Some(logs_dir) = self.logs_dir.as_deref() {
+            match append_memory_recall_receipt_to_store(
+                logs_dir,
+                recall_id,
+                self.remember_last_query.clone(),
+                now_unix_ms(),
+                ColdMemoryRecallOutcome::CancelledNoInjection,
+                &self.remember_candidates,
+                &HashSet::new(),
+            ) {
+                Ok(_) => {}
+                Err(err) => {
+                    receipt_status = format!(" Recall receipt write failed: {err:#}.");
+                }
+            }
+        }
+        self.remember_candidates.clear();
+        self.remember_selected_ids.clear();
+        self.remember_expanded_ids.clear();
+        self.remember_feedback_marked.clear();
+        self.remember_prior_feedback.clear();
+        self.remember_recall_id = None;
+        self.remember_status = format!(
+            "Past-chat results closed. Nothing will be used with your next message.{}",
+            receipt_status
+        );
+    }
+
+    fn next_remember_recall_id(&mut self) -> String {
+        self.remember_recall_seq = self.remember_recall_seq.saturating_add(1);
+        format_remember_recall_id(now_unix_ms(), self.remember_recall_seq)
+    }
+
+    fn create_default_semantic_bucket_map(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Bucket map needs a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match create_default_interaction_bucket_map_if_missing(
+            &paths.bucket_map_json,
+            now_unix_ms(),
+        ) {
+            Ok(Some(map)) => {
+                self.semantic_bucket_map_view = Self::format_semantic_bucket_map(&map);
+                self.semantic_bucket_placement_view.clear();
+                self.semantic_query_preview.clear();
+                self.semantic_review_bucket_map = None;
+                self.semantic_review_proposed.clear();
+                self.semantic_review_approve_ids.clear();
+                self.semantic_review_reject_ids.clear();
+                self.semantic_review_inspections.clear();
+                self.semantic_sift_proposal = None;
+                self.semantic_sift_inspections.clear();
+                self.semantic_sort_status = format!(
+                    "Created starter semantic bucket map with {} positive bucket(s) plus misc.",
+                    map.positive_bucket_count
+                );
+            }
+            Ok(None) => {
+                self.refresh_semantic_bucket_map_view();
+                self.semantic_sort_status =
+                    "Semantic bucket map already exists; kept the existing frozen map.".to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Bucket map create failed: {err:#}");
+            }
+        }
+    }
+
+    fn refresh_semantic_bucket_map_view(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_bucket_map_view.clear();
+            self.semantic_sort_status = "Bucket map needs a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match read_bucket_map_json(&paths.bucket_map_json) {
+            Ok(Some(map)) => {
+                self.semantic_bucket_map_view = Self::format_semantic_bucket_map(&map);
+                self.semantic_sort_status = format!(
+                    "Loaded semantic bucket map '{}': {} positive bucket(s) plus misc.",
+                    map.map_id, map.positive_bucket_count
+                );
+            }
+            Ok(None) => {
+                self.semantic_bucket_map_view =
+                    "No semantic bucket map yet. Create the starter v1 map before sorting."
+                        .to_string();
+                self.semantic_sort_status =
+                    "No semantic bucket map found at memory/cold_semantic/bucket_map.json."
+                        .to_string();
+            }
+            Err(err) => {
+                self.semantic_bucket_map_view.clear();
+                self.semantic_sort_status = format!("Bucket map load failed: {err:#}");
+            }
+        }
+    }
+
+    fn refresh_semantic_bucket_placement_view(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_bucket_placement_view.clear();
+            self.semantic_sort_status = "Bucket placements need a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match read_bucket_map_json(&paths.bucket_map_json).and_then(|bucket_map| {
+            let Some(bucket_map) = bucket_map else {
+                anyhow::bail!("cannot inspect semantic placements without bucket_map.json");
+            };
+            let placements = read_placements_jsonl(&paths.placements_jsonl)?;
+            render_semantic_bucket_placement_overview(&bucket_map, &placements)
+        }) {
+            Ok(view) => {
+                self.semantic_bucket_placement_view = view;
+                self.semantic_sort_status = "Loaded semantic bucket placements.".to_string();
+            }
+            Err(err) => {
+                self.semantic_bucket_placement_view.clear();
+                self.semantic_sort_status = format!("Bucket placement load failed: {err:#}");
+            }
+        }
+    }
+
+    fn preview_semantic_bucket_query(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status =
+                "Semantic bucket query preview needs a memory folder.".to_string();
+            return;
+        };
+        let query_text = self.semantic_query_preview_text.trim().to_string();
+        if query_text.is_empty() {
+            self.semantic_sort_status =
+                "Enter a phrase before previewing semantic bucket query.".to_string();
+            return;
+        }
+
+        let mut query = ColdSemanticQuery::remember_current_input(query_text);
+        query.include_misc = self.semantic_query_preview_include_misc;
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match query_semantic_index_store(&paths, &query) {
+            Ok(hits) => {
+                let hit_count = hits.len();
+                self.semantic_query_preview = render_semantic_query_preview(&query, &hits);
+                self.semantic_sort_status = format!(
+                    "Semantic bucket query preview found {} approved placement hit(s). No context was hydrated or injected.",
+                    hit_count
+                );
+            }
+            Err(err) => {
+                self.semantic_query_preview.clear();
+                self.semantic_sort_status =
+                    format!("Semantic bucket query preview failed: {err:#}");
+            }
+        }
+    }
+
+    fn preview_recall_routes(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Recall route preview needs a memory folder.".to_string();
+            return;
+        };
+        let query_text = self.recall_route_preview_text.trim().to_string();
+        if query_text.is_empty() {
+            self.semantic_sort_status =
+                "Enter a phrase before previewing recall routes.".to_string();
+            return;
+        }
+
+        let cold_query = ColdMemoryQuery::remember_current_input(query_text.clone());
+        let mut lane_notes = Vec::new();
+
+        let atlas_paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+        let mut atlas_query = ColdAtlasQuery::remember_current_input(query_text.clone());
+        atlas_query.include_superseded = self.recall_route_preview_include_superseded;
+        let atlas_hits = match query_cold_atlas_store(&atlas_paths, &atlas_query) {
+            Ok(hits) => hits,
+            Err(err) => {
+                lane_notes.push(format!("atlas skipped: {err:#}"));
+                Vec::new()
+            }
+        };
+        let atlas_candidates =
+            match hydrate_atlas_cold_hits(Some(logs_dir), &cold_query, &atlas_hits) {
+                Ok(candidates) => candidates,
+                Err(err) => {
+                    lane_notes.push(format!("atlas hydration skipped: {err:#}"));
+                    Vec::new()
+                }
+            };
+
+        let semantic_paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        let mut semantic_query = ColdSemanticQuery::remember_current_input(query_text.clone());
+        semantic_query.include_misc = self.recall_route_preview_include_misc;
+        let semantic_hits = match query_semantic_index_store(&semantic_paths, &semantic_query) {
+            Ok(hits) => hits,
+            Err(err) => {
+                lane_notes.push(format!("semantic skipped: {err:#}"));
+                Vec::new()
+            }
+        };
+        let semantic_candidates =
+            match hydrate_semantic_cold_hits(Some(logs_dir), &cold_query, &semantic_hits) {
+                Ok(candidates) => candidates,
+                Err(err) => {
+                    lane_notes.push(format!("semantic hydration skipped: {err:#}"));
+                    Vec::new()
+                }
+            };
+
+        let ranked_hits = self
+            .bookkeeper
+            .as_ref()
+            .and_then(|bk| {
+                bk.search(query_text, None, None, cold_query.max_candidates * 3)
+                    .ok()
+            })
+            .unwrap_or_default();
+        let cold_candidates = match query_cold_memory(Some(logs_dir), &cold_query, &ranked_hits) {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                lane_notes.push(format!("cold-log direct skipped: {err:#}"));
+                Vec::new()
+            }
+        };
+        let merged_candidates = merge_remember_candidates(
+            atlas_candidates,
+            semantic_candidates,
+            cold_candidates.clone(),
+            cold_query.max_candidates,
+        );
+
+        let mut preview = render_recall_route_preview(
+            &cold_query,
+            &atlas_hits,
+            &semantic_hits,
+            &cold_candidates,
+            &merged_candidates,
+        );
+        if !lane_notes.is_empty() {
+            preview.push_str("\nLane notes\n");
+            for note in &lane_notes {
+                preview.push_str(&format!("  - {note}\n"));
+            }
+        }
+        self.recall_route_preview = preview;
+        self.semantic_sort_status = format!(
+            "Recall route preview: atlas {}, semantic {}, cold-log {}, merged {}. No context was attached or promoted.",
+            atlas_hits.len(),
+            semantic_hits.len(),
+            cold_candidates.len(),
+            merged_candidates.len()
+        );
+    }
+
+    fn refresh_cold_atlas_view(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.cold_atlas_records.clear();
+            self.cold_atlas_inspections.clear();
+            self.cold_atlas_lineage_links.clear();
+            self.cold_atlas_lineage_view.clear();
+            self.cold_atlas_view.clear();
+            self.semantic_sort_status = "Cold atlas needs a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+        match read_cold_atlas_records_jsonl(&paths.records_jsonl).and_then(|records| {
+            let receipts = read_cold_atlas_receipts_jsonl(&paths.receipts_jsonl)?;
+            Ok::<_, anyhow::Error>((records, receipts))
+        }) {
+            Ok((records, receipts)) => {
+                self.cold_atlas_view = render_cold_atlas_overview(&records);
+                self.cold_atlas_lineage_links = cold_atlas_lineage_links(&receipts);
+                self.cold_atlas_lineage_view =
+                    render_cold_atlas_lineage_overview(&records, &receipts);
+                self.cold_atlas_records = records;
+                self.cold_atlas_inspections.clear();
+                self.semantic_sort_status = "Loaded cold atlas records.".to_string();
+            }
+            Err(err) => {
+                self.cold_atlas_records.clear();
+                self.cold_atlas_inspections.clear();
+                self.cold_atlas_lineage_links.clear();
+                self.cold_atlas_lineage_view.clear();
+                self.cold_atlas_view.clear();
+                self.semantic_sort_status = format!("Cold atlas load failed: {err:#}");
+            }
+        }
+    }
+
+    fn mark_cold_atlas_record_status(&mut self, atlas_id: &str, to_status: ColdAtlasRecordStatus) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status =
+                "Cold atlas status change needs a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+        let note = "User changed cold atlas record status from the Logs tab.";
+        match apply_cold_atlas_status_change_to_store(
+            &paths,
+            atlas_id,
+            to_status,
+            now_unix_ms(),
+            note,
+        ) {
+            Ok(receipt) => {
+                self.refresh_cold_atlas_view();
+                self.refresh_semantic_receipts_view();
+                self.semantic_sort_status = format!(
+                    "Cold atlas record {} marked {} with receipt {}.",
+                    atlas_id,
+                    to_status.as_str(),
+                    receipt.receipt_id
+                );
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Cold atlas status change failed: {err:#}");
+            }
+        }
+    }
+
+    fn inspect_cold_atlas_evidence(&mut self, atlas_id: &str, evidence_index: usize) {
+        let inspection_id = format!("{atlas_id}:{evidence_index}");
+        if self.cold_atlas_inspections.contains_key(&inspection_id) {
+            self.cold_atlas_inspections.remove(&inspection_id);
+            return;
+        }
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status =
+                "Cold atlas evidence inspection needs a memory folder.".to_string();
+            return;
+        };
+        let Some(record) = self
+            .cold_atlas_records
+            .iter()
+            .find(|record| record.atlas_id == atlas_id)
+            .cloned()
+        else {
+            self.semantic_sort_status = format!("Cold atlas record {atlas_id} is not loaded.");
+            return;
+        };
+        let Some(evidence_ref) = record.evidence_refs.get(evidence_index).cloned() else {
+            self.semantic_sort_status = format!(
+                "Cold atlas record {} has no evidence ref {}.",
+                atlas_id,
+                evidence_index + 1
+            );
+            return;
+        };
+
+        let recall_trace = ColdMemoryRecallTrace {
+            lane: ColdMemoryRecallLane::ColdAtlas,
+            reason: format!(
+                "Atlas evidence inspection only for '{}' ref {}. This does not revise, inject, promote, or rewrite memory.",
+                record.title,
+                evidence_index + 1
+            ),
+            bucket_id: Some(record.atlas_id.clone()),
+            bucket_label: Some(record.title.clone()),
+            placement_id: None,
+            atlas: None,
+        };
+        match hydrate_cold_evidence_ref(Some(logs_dir), &evidence_ref, 1, recall_trace) {
+            Ok(Some(candidate)) => {
+                self.cold_atlas_inspections.insert(
+                    inspection_id,
+                    format!(
+                        "USER-INSPECTED COLD ATLAS EVIDENCE\nHistorical evidence only. Inspecting this block does not revise, inject, promote, or rewrite memory.\n\n{}",
+                        candidate.context_block
+                    ),
+                );
+                self.semantic_sort_status =
+                    "Hydrated exact cold-log context for atlas evidence inspection.".to_string();
+            }
+            Ok(None) => {
+                self.semantic_sort_status =
+                    "No exact cold-log context could be hydrated for this atlas evidence ref."
+                        .to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_status =
+                    format!("Cold atlas evidence inspection failed: {err:#}");
+            }
+        }
+    }
+
+    fn preview_cold_atlas_query(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status =
+                "Cold atlas query preview needs a memory folder.".to_string();
+            return;
+        };
+        let query_text = self.cold_atlas_query_text.trim().to_string();
+        if query_text.is_empty() {
+            self.semantic_sort_status = "Enter a phrase before previewing atlas query.".to_string();
+            return;
+        }
+
+        let mut query = ColdAtlasQuery::remember_current_input(query_text);
+        query.include_superseded = self.cold_atlas_query_include_superseded;
+        let paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+        match query_cold_atlas_store(&paths, &query) {
+            Ok(hits) => {
+                let hit_count = hits.len();
+                self.cold_atlas_query_preview = render_cold_atlas_query_preview(&query, &hits);
+                self.semantic_sort_status = format!(
+                    "Cold atlas query preview found {} hit(s). No context was hydrated or injected.",
+                    hit_count
+                );
+            }
+            Err(err) => {
+                self.cold_atlas_query_preview.clear();
+                self.semantic_sort_status = format!("Cold atlas query preview failed: {err:#}");
+            }
+        }
+    }
+
+    fn prepare_cold_atlas_from_approved_placements(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Cold atlas needs a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match prepare_cold_atlas_run(&paths, self.cold_atlas_max_items) {
+            Ok(Some(prepared)) => {
+                self.semantic_sort_status = format!(
+                    "Prepared cold atlas draft input from {} approved semantic placement ref(s). Paste atlas JSON to preview.",
+                    prepared.evidence.len()
+                );
+                self.cold_atlas_prepared = Some(prepared);
+                self.cold_atlas_revision_target_id = None;
+                self.cold_atlas_supersede_target_id = None;
+                self.cold_atlas_output_json.clear();
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+            }
+            Ok(None) => {
+                self.cold_atlas_prepared = None;
+                self.cold_atlas_revision_target_id = None;
+                self.cold_atlas_supersede_target_id = None;
+                self.cold_atlas_output_json.clear();
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                self.semantic_sort_status =
+                    "Cold atlas needs approved semantic placements before it can draft shape records."
+                        .to_string();
+            }
+            Err(err) => {
+                self.cold_atlas_prepared = None;
+                self.cold_atlas_revision_target_id = None;
+                self.cold_atlas_supersede_target_id = None;
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                self.semantic_sort_status = format!("Cold atlas prepare failed: {err:#}");
+            }
+        }
+    }
+
+    fn stage_cold_atlas_revision(&mut self, atlas_id: &str) {
+        let Some(record) = self
+            .cold_atlas_records
+            .iter()
+            .find(|record| record.atlas_id == atlas_id)
+            .cloned()
+        else {
+            self.semantic_sort_status = format!("Cold atlas record {atlas_id} is not loaded.");
+            return;
+        };
+
+        match (
+            prepare_cold_atlas_revision_run(&record),
+            render_cold_atlas_record_draft_json(&record),
+        ) {
+            (Ok(prepared), Ok(json)) => {
+                self.cold_atlas_prepared = Some(prepared);
+                self.cold_atlas_revision_target_id = Some(record.atlas_id.clone());
+                self.cold_atlas_supersede_target_id = None;
+                self.cold_atlas_output_json = json;
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                self.semantic_sort_status = format!(
+                    "Staged atlas revision for {}. Edit JSON, preview, then commit.",
+                    record.atlas_id
+                );
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                self.semantic_sort_status = format!("Cold atlas revision stage failed: {err:#}");
+            }
+        }
+    }
+
+    fn stage_cold_atlas_supersede(&mut self, atlas_id: &str) {
+        let Some(record) = self
+            .cold_atlas_records
+            .iter()
+            .find(|record| record.atlas_id == atlas_id)
+            .cloned()
+        else {
+            self.semantic_sort_status = format!("Cold atlas record {atlas_id} is not loaded.");
+            return;
+        };
+
+        match (
+            prepare_cold_atlas_supersede_run(&record),
+            render_cold_atlas_replacement_draft_json(&record),
+        ) {
+            (Ok(prepared), Ok(json)) => {
+                self.cold_atlas_prepared = Some(prepared);
+                self.cold_atlas_revision_target_id = None;
+                self.cold_atlas_supersede_target_id = Some(record.atlas_id.clone());
+                self.cold_atlas_output_json = json;
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                self.semantic_sort_status = format!(
+                    "Staged atlas supersede for {}. Edit replacement JSON, preview, then commit.",
+                    record.atlas_id
+                );
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                self.semantic_sort_status = format!("Cold atlas supersede stage failed: {err:#}");
+            }
+        }
+    }
+
+    fn draft_prepared_cold_atlas_with_bookkeeper(&mut self) {
+        let Some(prepared) = self.cold_atlas_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare cold atlas evidence before asking Bookkeeper to draft JSON.".to_string();
+            return;
+        };
+        let Some(bookkeeper) = self.bookkeeper.clone() else {
+            self.semantic_sort_status =
+                "Start Bookkeeper before asking it to draft cold atlas JSON.".to_string();
+            return;
+        };
+        if self.cold_atlas_draft_rx.is_some() {
+            self.semantic_sort_status =
+                "Bookkeeper is already drafting cold atlas JSON.".to_string();
+            return;
+        }
+
+        let prompt = prepared.prompt.clone();
+        let max_tokens = (prepared.evidence.len().max(1) * 360).clamp(512, 4096);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = bookkeeper
+                .draft_cold_atlas(prompt, max_tokens)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.cold_atlas_draft_rx = Some(rx);
+        self.semantic_sort_status = format!(
+            "Bookkeeper is drafting cold atlas JSON from {} evidence ref(s). Review before commit.",
+            prepared.evidence.len()
+        );
+    }
+
+    fn drain_cold_atlas_draft(&mut self) {
+        let Some(rx) = &self.cold_atlas_draft_rx else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.cold_atlas_draft_rx = None;
+        match result {
+            Ok(json) => {
+                self.cold_atlas_output_json = json;
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                self.semantic_sort_status =
+                    "Bookkeeper drafted cold atlas JSON. Inspect or edit it, then preview before commit."
+                        .to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Bookkeeper cold atlas draft failed: {err}");
+            }
+        }
+    }
+
+    fn preview_cold_atlas_json(&mut self) {
+        let Some(prepared) = self.cold_atlas_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare cold atlas evidence before previewing atlas JSON.".to_string();
+            return;
+        };
+        if self.cold_atlas_output_json.trim().is_empty() {
+            self.semantic_sort_status = "Paste cold atlas JSON before previewing.".to_string();
+            return;
+        }
+
+        let preview_result = if let Some(target_id) = self.cold_atlas_supersede_target_id.as_deref()
+        {
+            match self
+                .cold_atlas_records
+                .iter()
+                .find(|record| record.atlas_id == target_id)
+            {
+                Some(existing_record) => render_cold_atlas_supersede_preview(
+                    &self.cold_atlas_records,
+                    existing_record,
+                    prepared,
+                    self.cold_atlas_output_json.trim(),
+                    now_unix_ms(),
+                ),
+                None => Err(anyhow::anyhow!(
+                    "cold atlas supersede target {target_id} is not loaded"
+                )),
+            }
+        } else if let Some(target_id) = self.cold_atlas_revision_target_id.as_deref() {
+            match self
+                .cold_atlas_records
+                .iter()
+                .find(|record| record.atlas_id == target_id)
+            {
+                Some(existing_record) => render_cold_atlas_revision_preview(
+                    existing_record,
+                    prepared,
+                    self.cold_atlas_output_json.trim(),
+                    now_unix_ms(),
+                ),
+                None => Err(anyhow::anyhow!(
+                    "cold atlas revision target {target_id} is not loaded"
+                )),
+            }
+        } else {
+            render_cold_atlas_review_preview(
+                &prepared.evidence,
+                self.cold_atlas_output_json.trim(),
+                now_unix_ms(),
+            )
+        };
+
+        match preview_result {
+            Ok(preview) => {
+                self.cold_atlas_review_preview = preview;
+                self.cold_atlas_reviewed_json = self.cold_atlas_output_json.trim().to_string();
+                self.semantic_sort_status = if self.cold_atlas_supersede_target_id.is_some() {
+                    "Cold atlas supersede JSON validated for preview. Review before commit."
+                        .to_string()
+                } else if self.cold_atlas_revision_target_id.is_some() {
+                    "Cold atlas revision JSON validated for preview. Review before commit."
+                        .to_string()
+                } else {
+                    "Cold atlas JSON validated for preview. Review before commit.".to_string()
+                };
+            }
+            Err(err) => {
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                self.semantic_sort_status = format!("Cold atlas preview failed: {err:#}");
+            }
+        }
+    }
+
+    fn cold_atlas_current_json_is_reviewed(&self) -> bool {
+        cold_atlas_json_matches_reviewed(
+            &self.cold_atlas_output_json,
+            &self.cold_atlas_reviewed_json,
+        )
+    }
+
+    fn mark_cold_atlas_json_edited(&mut self) {
+        if self.cold_atlas_current_json_is_reviewed() {
+            return;
+        }
+        self.cold_atlas_reviewed_json.clear();
+        self.cold_atlas_review_preview.clear();
+    }
+
+    fn commit_cold_atlas_from_json(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Cold atlas needs a memory folder.".to_string();
+            return;
+        };
+        let Some(prepared) = self.cold_atlas_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare cold atlas evidence before committing atlas JSON.".to_string();
+            return;
+        };
+        if self.cold_atlas_output_json.trim().is_empty() {
+            self.semantic_sort_status = "Paste cold atlas JSON before committing.".to_string();
+            return;
+        }
+        if !self.cold_atlas_current_json_is_reviewed() {
+            self.semantic_sort_status =
+                "Preview the exact current cold atlas JSON before committing.".to_string();
+            return;
+        }
+
+        let paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+        let commit_result = if let Some(target_id) = self.cold_atlas_supersede_target_id.as_deref()
+        {
+            commit_prepared_cold_atlas_supersede_to_store(
+                &paths,
+                prepared,
+                target_id,
+                self.cold_atlas_output_json.trim(),
+                now_unix_ms(),
+                "Committed from Logs tab cold atlas supersede panel.",
+            )
+            .map(|receipts| {
+                format!(
+                    "Superseded cold atlas record with {} receipt(s).",
+                    receipts.len()
+                )
+            })
+        } else if let Some(target_id) = self.cold_atlas_revision_target_id.as_deref() {
+            commit_prepared_cold_atlas_revision_to_store(
+                &paths,
+                prepared,
+                target_id,
+                self.cold_atlas_output_json.trim(),
+                now_unix_ms(),
+                "Committed from Logs tab cold atlas revision panel.",
+            )
+            .map(|receipt| {
+                format!(
+                    "Revised cold atlas record with receipt {}.",
+                    receipt.receipt_id
+                )
+            })
+        } else {
+            commit_prepared_cold_atlas_run(
+                &paths,
+                prepared,
+                self.cold_atlas_output_json.trim(),
+                now_unix_ms(),
+            )
+            .map(|committed| {
+                format!(
+                    "Committed cold atlas: {} record(s), {} receipt(s).",
+                    committed.record_count, committed.receipt_count
+                )
+            })
+        };
+
+        match commit_result {
+            Ok(status) => {
+                self.semantic_sort_status = status;
+                self.cold_atlas_prepared = None;
+                self.cold_atlas_revision_target_id = None;
+                self.cold_atlas_supersede_target_id = None;
+                self.cold_atlas_output_json.clear();
+                self.cold_atlas_review_preview.clear();
+                self.cold_atlas_reviewed_json.clear();
+                let commit_status = self.semantic_sort_status.clone();
+                self.refresh_cold_atlas_view();
+                self.refresh_semantic_receipts_view();
+                if !commit_status.is_empty() {
+                    self.semantic_sort_status = commit_status;
+                }
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Cold atlas commit failed: {err:#}");
+            }
+        }
+    }
+
+    fn refresh_semantic_receipts_view(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_receipts_view.clear();
+            self.semantic_sort_status = "Semantic receipts need a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match (|| {
+            let sort_receipts = read_sort_receipts_jsonl(&paths.sort_receipts_jsonl)?;
+            let placement_review_receipts =
+                read_placement_review_receipts_jsonl(&paths.placement_review_receipts_jsonl)?;
+            let sift_receipts = read_sift_receipts_jsonl(&paths.sift_receipts_jsonl)?;
+            let remember_receipts =
+                read_memory_attachment_receipts_jsonl(remember_attachment_receipts_path(logs_dir))?;
+            let recall_receipts =
+                read_memory_recall_receipts_jsonl(remember_recall_receipts_path(logs_dir))?;
+            let feedback_receipts =
+                read_memory_feedback_receipts_jsonl(remember_feedback_receipts_path(logs_dir))?;
+            let atlas_paths = ColdAtlasPaths::under_memory_dir(logs_dir);
+            let atlas_receipts = read_cold_atlas_receipts_jsonl(&atlas_paths.receipts_jsonl)?;
+            let mut view = render_semantic_receipts_overview(
+                &sort_receipts,
+                &placement_review_receipts,
+                &sift_receipts,
+            );
+            view.push('\n');
+            view.push_str(&render_memory_remember_session_receipts_overview(
+                &recall_receipts,
+                &remember_receipts,
+            ));
+            view.push('\n');
+            view.push_str(&render_memory_feedback_receipts_overview(
+                &feedback_receipts,
+            ));
+            view.push('\n');
+            view.push_str(&render_cold_atlas_receipts_overview(&atlas_receipts));
+            Ok::<_, anyhow::Error>(view)
+        })() {
+            Ok(view) => {
+                self.semantic_receipts_view = view;
+                self.semantic_sort_status =
+                    "Loaded semantic, Remember, and cold atlas governance receipts.".to_string();
+            }
+            Err(err) => {
+                self.semantic_receipts_view.clear();
+                self.semantic_sort_status = format!("Semantic receipts load failed: {err:#}");
+            }
+        }
+    }
+
+    fn refresh_semantic_placement_review(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_review_bucket_map = None;
+            self.semantic_review_proposed.clear();
+            self.semantic_review_approve_ids.clear();
+            self.semantic_review_reject_ids.clear();
+            self.semantic_sort_status = "Placement review needs a memory folder.".to_string();
+            return;
+        };
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match read_bucket_map_json(&paths.bucket_map_json).and_then(|bucket_map| {
+            let Some(bucket_map) = bucket_map else {
+                anyhow::bail!("cannot review semantic placements without bucket_map.json");
+            };
+            let placements = read_placements_jsonl(&paths.placements_jsonl)?;
+            Ok::<_, anyhow::Error>((bucket_map, placements))
+        }) {
+            Ok((bucket_map, placements)) => {
+                self.semantic_review_bucket_map = Some(bucket_map);
+                self.semantic_review_proposed = semantic_review_queue_placements(&placements);
+                self.semantic_review_approve_ids.clear();
+                self.semantic_review_reject_ids.clear();
+                self.semantic_review_inspections.clear();
+                self.semantic_sort_status = format!(
+                    "Loaded {} semantic placement(s) for review.",
+                    self.semantic_review_proposed.len()
+                );
+            }
+            Err(err) => {
+                self.semantic_review_bucket_map = None;
+                self.semantic_review_proposed.clear();
+                self.semantic_review_approve_ids.clear();
+                self.semantic_review_reject_ids.clear();
+                self.semantic_review_inspections.clear();
+                self.semantic_sort_status = format!("Placement review load failed: {err:#}");
+            }
+        }
+    }
+
+    fn set_semantic_review_approve(&mut self, placement_id: &str, selected: bool) {
+        if selected {
+            self.semantic_review_reject_ids.remove(placement_id);
+            self.semantic_review_approve_ids
+                .insert(placement_id.to_string());
+        } else {
+            self.semantic_review_approve_ids.remove(placement_id);
+        }
+    }
+
+    fn set_semantic_review_reject(&mut self, placement_id: &str, selected: bool) {
+        if selected {
+            self.semantic_review_approve_ids.remove(placement_id);
+            self.semantic_review_reject_ids
+                .insert(placement_id.to_string());
+        } else {
+            self.semantic_review_reject_ids.remove(placement_id);
+        }
+    }
+
+    fn inspect_semantic_review_placement(&mut self, placement_id: &str) {
+        if self.semantic_review_inspections.contains_key(placement_id) {
+            self.semantic_review_inspections.remove(placement_id);
+            return;
+        }
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Placement inspection needs a memory folder.".to_string();
+            return;
+        };
+        let Some(placement) = self
+            .semantic_review_proposed
+            .iter()
+            .find(|placement| placement.placement_id == placement_id)
+            .cloned()
+        else {
+            self.semantic_sort_status =
+                "Refresh proposed placements before inspecting this placement.".to_string();
+            return;
+        };
+
+        let recall_trace = ColdMemoryRecallTrace {
+            lane: ColdMemoryRecallLane::SemanticBucket,
+            reason: format!(
+                "Placement review inspection only for bucket '{}' with {} fit. This does not approve, inject, or promote the evidence.",
+                placement.bucket_id,
+                placement.fit.as_str()
+            ),
+            bucket_id: Some(placement.bucket_id.clone()),
+            bucket_label: Some(placement.bucket_id.clone()),
+            placement_id: Some(placement.placement_id.clone()),
+            atlas: None,
+        };
+        match hydrate_cold_evidence_ref(Some(logs_dir), &placement.evidence_ref, 1, recall_trace) {
+            Ok(Some(candidate)) => {
+                self.semantic_review_inspections.insert(
+                    placement.placement_id.clone(),
+                    format!(
+                        "USER-INSPECTED COLD LOG EVIDENCE\nHistorical evidence only. Inspecting this block does not approve, inject, promote, or rewrite memory.\n\n{}",
+                        candidate.context_block
+                    ),
+                );
+                self.semantic_sort_status =
+                    "Hydrated exact cold-log context for placement inspection.".to_string();
+            }
+            Ok(None) => {
+                self.semantic_sort_status =
+                    "No exact cold-log context could be hydrated for this placement.".to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Placement inspection failed: {err:#}");
+            }
+        }
+    }
+
+    fn apply_semantic_placement_review(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Placement review needs a memory folder.".to_string();
+            return;
+        };
+        if self.semantic_review_approve_ids.is_empty() && self.semantic_review_reject_ids.is_empty()
+        {
+            self.semantic_sort_status =
+                "Select at least one proposed placement to approve or reject.".to_string();
+            return;
+        }
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match apply_placement_review_decisions_to_store(
+            &paths,
+            &self.semantic_review_approve_ids,
+            &self.semantic_review_reject_ids,
+            now_unix_ms(),
+        ) {
+            Ok(receipt) => {
+                let review_status = format!(
+                    "Applied placement review: approved {}, rejected {}, remaining proposed {}.",
+                    receipt.approved_placement_ids.len(),
+                    receipt.rejected_placement_ids.len(),
+                    receipt.remaining_proposed_count
+                );
+                self.semantic_review_inspections.clear();
+                self.refresh_semantic_placement_review();
+                self.refresh_semantic_bucket_placement_view();
+                self.refresh_semantic_receipts_view();
+                self.semantic_sort_status = review_status;
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Placement review apply failed: {err:#}");
+            }
+        }
+    }
+
+    fn propose_semantic_bucket_sift(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Bucket sifting needs a memory folder.".to_string();
+            return;
+        };
+        let bucket_id = self.semantic_sift_bucket_id.trim().to_string();
+        if bucket_id.is_empty() {
+            self.semantic_sort_status = "Enter a bucket id before proposing a sift.".to_string();
+            return;
+        }
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match read_bucket_map_json(&paths.bucket_map_json).and_then(|bucket_map| {
+            let Some(bucket_map) = bucket_map else {
+                anyhow::bail!("cannot propose bucket sift without bucket_map.json");
+            };
+            let placements = read_placements_jsonl(&paths.placements_jsonl)?;
+            let feedback_receipts =
+                read_memory_feedback_receipts_jsonl(remember_feedback_receipts_path(logs_dir))?;
+            let proposal = build_bucket_sift_proposal_with_feedback(
+                &bucket_map,
+                &placements,
+                &bucket_id,
+                now_unix_ms(),
+                &feedback_receipts,
+            )?;
+            if let Some(proposal) = &proposal {
+                append_sift_proposal_jsonl(&paths.sift_proposals_jsonl, proposal)?;
+            }
+            Ok::<_, anyhow::Error>(proposal)
+        }) {
+            Ok(Some(proposal)) => {
+                let change_count = proposal.changes.len();
+                self.semantic_sift_proposal = Some(proposal);
+                self.semantic_sift_inspections.clear();
+                self.semantic_sort_status = format!(
+                    "Proposed {change_count} sift change(s) for bucket '{bucket_id}'. Select changes to apply."
+                );
+            }
+            Ok(None) => {
+                self.semantic_sift_proposal = None;
+                self.semantic_sift_inspections.clear();
+                self.semantic_sort_status = format!(
+                    "No weak-fit, duplicate, or feedback-driven cleanup proposed for bucket '{bucket_id}'."
+                );
+            }
+            Err(err) => {
+                self.semantic_sift_proposal = None;
+                self.semantic_sift_inspections.clear();
+                self.semantic_sort_status = format!("Bucket sift proposal failed: {err:#}");
+            }
+        }
+    }
+
+    fn set_semantic_sift_change_selected(&mut self, change_id: &str, selected: bool) {
+        if let Some(proposal) = &mut self.semantic_sift_proposal {
+            if let Some(change) = proposal
+                .changes
+                .iter_mut()
+                .find(|change| change.change_id == change_id)
+            {
+                change.selected_for_apply = selected;
+            }
+        }
+    }
+
+    fn inspect_semantic_sift_change(&mut self, change_id: &str) {
+        if self.semantic_sift_inspections.contains_key(change_id) {
+            self.semantic_sift_inspections.remove(change_id);
+            return;
+        }
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Sift inspection needs a memory folder.".to_string();
+            return;
+        };
+        let Some(change) = self
+            .semantic_sift_proposal
+            .as_ref()
+            .and_then(|proposal| {
+                proposal
+                    .changes
+                    .iter()
+                    .find(|change| change.change_id == change_id)
+            })
+            .cloned()
+        else {
+            self.semantic_sort_status =
+                "Create or refresh a sift proposal before inspecting this change.".to_string();
+            return;
+        };
+
+        let recall_trace = ColdMemoryRecallTrace {
+            lane: ColdMemoryRecallLane::SemanticBucket,
+            reason: format!(
+                "Bucket sift inspection only for change '{}'. This does not apply, inject, or promote the evidence.",
+                change.change_id
+            ),
+            bucket_id: change.from_bucket_id.clone(),
+            bucket_label: change.from_bucket_id.clone(),
+            placement_id: change.target_placement_id.clone(),
+            atlas: None,
+        };
+        match hydrate_cold_evidence_ref(Some(logs_dir), &change.evidence_ref, 1, recall_trace) {
+            Ok(Some(candidate)) => {
+                self.semantic_sift_inspections.insert(
+                    change.change_id.clone(),
+                    format!(
+                        "USER-INSPECTED SIFT COLD LOG EVIDENCE\nHistorical evidence only. Inspecting this block does not apply a sift change, inject, promote, or rewrite memory.\n\n{}",
+                        candidate.context_block
+                    ),
+                );
+                self.semantic_sort_status =
+                    "Hydrated exact cold-log context for sift inspection.".to_string();
+            }
+            Ok(None) => {
+                self.semantic_sort_status =
+                    "No exact cold-log context could be hydrated for this sift change.".to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Sift inspection failed: {err:#}");
+            }
+        }
+    }
+
+    fn apply_selected_semantic_sift_changes(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Bucket sifting needs a memory folder.".to_string();
+            return;
+        };
+        let Some(proposal) = self.semantic_sift_proposal.as_ref() else {
+            self.semantic_sort_status =
+                "Create a sift proposal before applying changes.".to_string();
+            return;
+        };
+        let selected_count = proposal
+            .changes
+            .iter()
+            .filter(|change| change.selected_for_apply)
+            .count();
+        if selected_count == 0 {
+            self.semantic_sort_status =
+                "Select at least one sift change before applying.".to_string();
+            return;
+        }
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match apply_selected_sift_changes_to_store(&paths, proposal, now_unix_ms()) {
+            Ok(receipt) => {
+                self.semantic_sift_proposal = None;
+                self.semantic_sift_inspections.clear();
+                self.refresh_semantic_bucket_placement_view();
+                self.refresh_semantic_placement_review();
+                self.refresh_semantic_receipts_view();
+                self.semantic_sort_status = format!(
+                    "Applied sift: {} change(s), {} rejected/skipped.",
+                    receipt.applied_change_ids.len(),
+                    receipt.rejected_change_ids.len()
+                );
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Bucket sift apply failed: {err:#}");
+            }
+        }
+    }
+
+    fn format_semantic_bucket_map(map: &ColdSemanticBucketMap) -> String {
+        let mut lines = vec![
+            format!("map_id: {}", map.map_id),
+            format!("positive_buckets: {}", map.positive_bucket_count),
+            format!("misc_bucket: {}", map.misc_bucket_id),
+            format!("sort_intent: {}", map.sort_intent),
+            String::new(),
+            "buckets:".to_string(),
+        ];
+        for bucket in &map.buckets {
+            lines.push(format!(
+                "- {} [{}]: {}",
+                bucket.bucket_id,
+                bucket.kind.as_str(),
+                bucket.label
+            ));
+            lines.push(format!("  {}", bucket.sort_intent));
+        }
+        lines.join("\n")
+    }
+
+    fn prepare_semantic_sort_from_logs(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Semantic sort needs a memory folder.".to_string();
+            return;
+        };
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match prepare_semantic_sort_run(Some(logs_dir), &paths, self.semantic_sort_max_items) {
+            Ok(Some(prepared)) => {
+                self.semantic_sort_status = format!(
+                    "Prepared {} compact interaction exchange(s) after cursor {:?}. Host limits each Bookkeeper draft to {} exchange at a time; commit, then prepare the next one.",
+                    prepared.evidence.len(),
+                    prepared.after_event_index,
+                    HOST_SEMANTIC_SORT_MAX_EVIDENCE_PER_DRAFT,
+                );
+                self.semantic_sort_prepared = Some(prepared);
+                self.semantic_sort_output_json.clear();
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+            }
+            Ok(None) => {
+                self.semantic_sort_prepared = None;
+                self.semantic_sort_output_json.clear();
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+                self.semantic_sort_status =
+                    "Semantic sort is caught up; no new interaction exchanges.".to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_prepared = None;
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+                self.semantic_sort_status = format!("Semantic sort prepare failed: {err:#}");
+            }
+        }
+    }
+
+    fn draft_prepared_semantic_sort_with_bookkeeper(&mut self) {
+        let Some(prepared) = self.semantic_sort_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare a semantic sort run before asking Bookkeeper to draft JSON.".to_string();
+            return;
+        };
+        let Some(bookkeeper) = self.bookkeeper.clone() else {
+            self.semantic_sort_status =
+                "Start Bookkeeper before asking it to draft semantic sorter JSON.".to_string();
+            return;
+        };
+        if self.semantic_sort_draft_rx.is_some() {
+            self.semantic_sort_status =
+                "Bookkeeper is already drafting semantic sorter JSON.".to_string();
+            return;
+        }
+
+        let prompt = prepared.prompt.clone();
+        let max_tokens = HOST_SEMANTIC_SORT_OUTPUT_TOKENS;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = bookkeeper
+                .draft_semantic_sort(prompt, max_tokens)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.semantic_sort_draft_rx = Some(rx);
+        self.semantic_sort_status = format!(
+            "Bookkeeper is drafting semantic sorter JSON for {} evidence item(s). Review before commit.",
+            prepared.evidence.len()
+        );
+    }
+
+    fn drain_semantic_sort_draft(&mut self) {
+        let Some(rx) = &self.semantic_sort_draft_rx else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.semantic_sort_draft_rx = None;
+        match result {
+            Ok(json) => {
+                self.semantic_sort_output_json = json;
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+                self.semantic_sort_status =
+                    "Bookkeeper drafted sorter JSON. Inspect or edit it, then commit if it looks right."
+                        .to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Bookkeeper semantic sort draft failed: {err}");
+            }
+        }
+    }
+
+    fn preview_prepared_semantic_sort_json(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Semantic sort preview needs a memory folder.".to_string();
+            return;
+        };
+        let Some(prepared) = self.semantic_sort_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare a semantic sort run before previewing sorter JSON.".to_string();
+            return;
+        };
+        if self.semantic_sort_output_json.trim().is_empty() {
+            self.semantic_sort_status = "Paste or draft sorter JSON before previewing.".to_string();
+            return;
+        }
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        match read_bucket_map_json(&paths.bucket_map_json).and_then(|bucket_map| {
+            let Some(bucket_map) = bucket_map else {
+                anyhow::bail!("cannot preview semantic sort without bucket_map.json");
+            };
+            render_semantic_sort_review_preview(
+                &bucket_map,
+                &prepared.evidence,
+                self.semantic_sort_output_json.trim(),
+            )
+        }) {
+            Ok(preview) => {
+                self.semantic_sort_review_preview = preview;
+                self.semantic_sort_reviewed_json =
+                    self.semantic_sort_output_json.trim().to_string();
+                self.semantic_sort_status =
+                    "Semantic sort JSON validated for preview. Review before commit.".to_string();
+            }
+            Err(err) => {
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+                self.semantic_sort_status = format!("Semantic sort preview failed: {err:#}");
+            }
+        }
+    }
+
+    fn semantic_sort_current_json_is_reviewed(&self) -> bool {
+        semantic_sort_json_matches_reviewed(
+            &self.semantic_sort_output_json,
+            &self.semantic_sort_reviewed_json,
+        )
+    }
+
+    fn mark_semantic_sort_json_edited(&mut self) {
+        if self.semantic_sort_current_json_is_reviewed() {
+            return;
+        }
+        self.semantic_sort_reviewed_json.clear();
+        self.semantic_sort_review_preview.clear();
+    }
+
+    fn commit_prepared_semantic_sort_from_json(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Semantic sort needs a memory folder.".to_string();
+            return;
+        };
+        let Some(prepared) = self.semantic_sort_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare a semantic sort run before committing sorter JSON.".to_string();
+            return;
+        };
+        if self.semantic_sort_output_json.trim().is_empty() {
+            self.semantic_sort_status = "Paste sorter JSON before committing.".to_string();
+            return;
+        }
+        if !self.semantic_sort_current_json_is_reviewed() {
+            self.semantic_sort_status =
+                "Preview the exact current sorter JSON before committing.".to_string();
+            return;
+        }
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        let receipt_id = format!("semantic-sort-{}", now_unix_ms());
+        match commit_prepared_semantic_sort_run(
+            &paths,
+            prepared,
+            self.semantic_sort_output_json.trim(),
+            receipt_id,
+            now_unix_ms(),
+            "Committed from Logs tab semantic sort panel.",
+        ) {
+            Ok(committed) => {
+                self.semantic_sort_status = format!(
+                    "Committed semantic sort: {} evidence item(s), {} proposed placement(s), cursor {:?}.",
+                    committed.evidence_count,
+                    committed.proposed_placement_count,
+                    committed.last_seen_event_index
+                );
+                self.semantic_sort_prepared = None;
+                self.semantic_sort_output_json.clear();
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+                let commit_status = self.semantic_sort_status.clone();
+                self.refresh_semantic_placement_review();
+                self.refresh_semantic_bucket_placement_view();
+                self.refresh_semantic_receipts_view();
+                if !commit_status.is_empty() {
+                    self.semantic_sort_status = commit_status;
+                }
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Semantic sort commit failed: {err:#}");
+            }
+        }
+    }
+
+    fn skip_prepared_semantic_sort_from_review(&mut self) {
+        let Some(logs_dir) = self.logs_dir.as_deref() else {
+            self.semantic_sort_status = "Semantic sort needs a memory folder.".to_string();
+            return;
+        };
+        let Some(prepared) = self.semantic_sort_prepared.as_ref() else {
+            self.semantic_sort_status =
+                "Prepare and preview a semantic sort run before skipping it.".to_string();
+            return;
+        };
+        if !self.semantic_sort_current_json_is_reviewed() {
+            self.semantic_sort_status =
+                "Preview the exact current sorter JSON before recording a skip.".to_string();
+            return;
+        }
+        let reason = self.semantic_sort_skip_reason.trim();
+        if reason.is_empty() {
+            self.semantic_sort_status =
+                "Give a reviewer reason before skipping semantic evidence.".to_string();
+            return;
+        }
+
+        let paths = ColdSemanticIndexPaths::under_memory_dir(logs_dir);
+        let receipt_id = format!("semantic-sort-skipped-{}", now_unix_ms());
+        match skip_prepared_semantic_sort_run(
+            &paths,
+            prepared,
+            receipt_id,
+            now_unix_ms(),
+            reason,
+        ) {
+            Ok(skipped) => {
+                self.semantic_sort_status = format!(
+                    "Skipped semantic sort: {} reviewed evidence item(s), no placements written, cursor {:?}.",
+                    skipped.evidence_count, skipped.last_seen_event_index
+                );
+                self.semantic_sort_prepared = None;
+                self.semantic_sort_output_json.clear();
+                self.semantic_sort_review_preview.clear();
+                self.semantic_sort_reviewed_json.clear();
+                self.semantic_sort_skip_reason.clear();
+                let skip_status = self.semantic_sort_status.clone();
+                self.refresh_semantic_receipts_view();
+                if !skip_status.is_empty() {
+                    self.semantic_sort_status = skip_status;
+                }
+            }
+            Err(err) => {
+                self.semantic_sort_status = format!("Semantic sort skip failed: {err:#}");
+            }
+        }
+    }
+
+    fn clear_semantic_sort_panel(&mut self) {
+        self.semantic_sort_prepared = None;
+        self.semantic_sort_output_json.clear();
+        self.semantic_sort_draft_rx = None;
+        self.semantic_sort_review_preview.clear();
+        self.semantic_sort_reviewed_json.clear();
+        self.semantic_sort_skip_reason.clear();
+        self.semantic_bucket_placement_view.clear();
+        self.semantic_review_bucket_map = None;
+        self.semantic_review_proposed.clear();
+        self.semantic_review_approve_ids.clear();
+        self.semantic_review_reject_ids.clear();
+        self.semantic_review_inspections.clear();
+        self.semantic_query_preview_text.clear();
+        self.semantic_query_preview.clear();
+        self.recall_route_preview_text.clear();
+        self.recall_route_preview.clear();
+        self.cold_atlas_prepared = None;
+        self.cold_atlas_draft_rx = None;
+        self.cold_atlas_output_json.clear();
+        self.cold_atlas_review_preview.clear();
+        self.cold_atlas_reviewed_json.clear();
+        self.cold_atlas_records.clear();
+        self.cold_atlas_inspections.clear();
+        self.cold_atlas_revision_target_id = None;
+        self.cold_atlas_supersede_target_id = None;
+        self.cold_atlas_lineage_links.clear();
+        self.cold_atlas_lineage_view.clear();
+        self.cold_atlas_query_text.clear();
+        self.cold_atlas_query_preview.clear();
+        self.cold_atlas_view.clear();
+        self.semantic_receipts_view.clear();
+        self.semantic_receipts_filter.clear();
+        self.semantic_sift_bucket_id.clear();
+        self.semantic_sift_proposal = None;
+        self.semantic_sift_inspections.clear();
+        self.semantic_sort_status = "Cleared semantic sort preparation.".to_string();
+    }
+
     fn start_multimodal_generation(&mut self, prompt: String, image_path: PathBuf) {
         if self.is_generating {
             return;
@@ -8082,8 +9986,7 @@ impl ChattyCogApp {
 
         let Some(model_path) = self.gguf_path.clone() else {
             self.runtime_status =
-                "Runtime: multimodal chat currently needs a local vision-ready model."
-                    .to_string();
+                "Runtime: multimodal chat currently needs a local vision-ready model.".to_string();
             return;
         };
         let runtime_dir = match find_runtime_windows_dir() {
@@ -8104,7 +10007,8 @@ impl ChattyCogApp {
             );
             return;
         }
-        let Some(mmproj_path) = find_matching_mmproj_path(&model_path, architecture.as_deref()) else {
+        let Some(mmproj_path) = find_matching_mmproj_path(&model_path, architecture.as_deref())
+        else {
             let arch_label = architecture.unwrap_or_else(|| "unknown".to_string());
             self.runtime_status = format!(
                 "Runtime: no matching mmproj file found for multimodal model architecture {arch_label}. Add a projector GGUF near the model first."
@@ -8112,7 +10016,10 @@ impl ChattyCogApp {
             return;
         };
 
-        self.pulse_ecg(90.0, "Generating a multimodal chat response with the local model.");
+        self.pulse_ecg(
+            90.0,
+            "Generating a multimodal chat response with the local model.",
+        );
 
         let (tx, rx) = crossbeam_channel::unbounded::<GenEvent>();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -8126,6 +10033,7 @@ impl ChattyCogApp {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| model_path.display().to_string());
         let system = self.build_generation_system_prompt(&prompt, &model_label);
+        self.remember_attached_context = None;
         let extra_args = mtmd_extra_args_for_model(&model_path, architecture.as_deref());
         let status_model_label = model_path
             .file_name()
@@ -8170,8 +10078,7 @@ impl ChattyCogApp {
 
         self.runtime_status = format!(
             "Runtime: multimodal image turn using {} + {}.",
-            status_model_label,
-            status_mmproj_label
+            status_model_label, status_mmproj_label
         );
         self.is_generating = true;
         self.gen_cancel = Some(cancel);
@@ -8235,6 +10142,15 @@ impl ChattyCogApp {
             system.push_str("This context came from another local ChattyCog peer. Treat it as optional background unless the current user message refers to it.\n");
             system.push_str(&truncate_for_ui(shared_lukewarm_context.trim(), 1_600));
             system.push('\n');
+        }
+        if let Some(attachment) = &self.remember_attached_context {
+            let remember_block =
+                render_host_selected_cold_context_attachment(attachment, 600, 12_000);
+            if !remember_block.trim().is_empty() {
+                system.push('\n');
+                system.push_str(remember_block.trim());
+                system.push('\n');
+            }
         }
         let recent_chat_context = build_recent_chat_prompt_context(&self.messages, 8, 6_000);
         if !recent_chat_context.trim().is_empty() {
@@ -8643,7 +10559,8 @@ After approval, the sandbox result will be returned to you on the next turn.\n",
                         {
                             self.model_runtime_issues.insert(
                                 key,
-                                "Gemma 4 multimodal runtime crash observed on this build.".to_string(),
+                                "Gemma 4 multimodal runtime crash observed on this build."
+                                    .to_string(),
                             );
                         }
                     }
@@ -9217,7 +11134,12 @@ impl eframe::App for ChattyCogApp {
             if let Ok((id, status)) = rx.try_recv() {
                 self.cloud_model_health_statuses.insert(id.clone(), status);
                 let checked_at = now_unix_ms().max(0) as u64;
-                if let Some(entry) = self.prefs.cloud_models.iter_mut().find(|entry| entry.id == id) {
+                if let Some(entry) = self
+                    .prefs
+                    .cloud_models
+                    .iter_mut()
+                    .find(|entry| entry.id == id)
+                {
                     if let Some(status) = self.cloud_model_health_statuses.get(&id) {
                         entry.last_health_status = status.clone();
                     }
@@ -9254,17 +11176,14 @@ impl eframe::App for ChattyCogApp {
                         }
                         self.save_prefs_quietly();
                         self.cloud_model_health_sweep_kind = None;
-                        self.prefs_status =
-                            format!("Finished retesting {kind} cloud models.");
+                        self.prefs_status = format!("Finished retesting {kind} cloud models.");
                     } else {
                         self.start_next_saved_cloud_model_health_check_from_queue();
                         let kind = self.cloud_model_health_sweep_kind.unwrap_or("saved");
                         let remaining = self.cloud_model_health_queue.len()
                             + usize::from(self.cloud_model_health_running_id.is_some());
-                        self.prefs_status = format!(
-                            "Retesting {kind} cloud models... {} remaining.",
-                            remaining,
-                        );
+                        self.prefs_status =
+                            format!("Retesting {kind} cloud models... {} remaining.", remaining,);
                     }
                 }
             }
@@ -9288,6 +11207,15 @@ impl eframe::App for ChattyCogApp {
                 self.lukewarm_rx = None;
                 self.lukewarm_poll_due = Some(Instant::now() + Duration::from_secs(2));
             }
+        }
+
+        if self.semantic_sort_draft_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            self.drain_semantic_sort_draft();
+        }
+        if self.cold_atlas_draft_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            self.drain_cold_atlas_draft();
         }
 
         if matches!(self.tab, Tab::Logs | Tab::Chat) && self.lukewarm_rx.is_none() {
@@ -10238,7 +12166,6 @@ fn resolve_portable_model_hint_for_dirs(
     None
 }
 
-
 fn selected_model_option_label(
     model_opts: &[ModelOption],
     current_value: Option<&str>,
@@ -10295,11 +12222,7 @@ fn show_grouped_model_option_combo(
             }
             let mut last_group: Option<ModelOptionGroup> = None;
             for option in model_opts {
-                if last_group
-                    .as_ref()
-                    .map(|group| group.rank())
-                    != Some(option.group.rank())
-                {
+                if last_group.as_ref().map(|group| group.rank()) != Some(option.group.rank()) {
                     ui.add_space(2.0);
                     ui.separator();
                     ui.add_enabled(
@@ -11001,10 +12924,26 @@ fn strip_chatty_output_markers(raw: &str) -> String {
         .replace("<|start_header_id|>", "")
         .replace("<|end_header_id|>", "")
         .replace("<|eot_id|>", "")
+        .replace("<|start|>", "")
+        .replace("<|end|>", "")
+        .replace("<|return|>", "")
 }
 
 fn clean_assistant_visible_output(raw: &str) -> String {
-    let mut text = strip_chatty_output_markers(raw);
+    let lower = raw.to_ascii_lowercase();
+    let analysis_marker = "<|channel|>analysis<|message|>";
+    let final_marker = "<|channel|>final<|message|>";
+    let visible_raw = if let Some(final_idx) = lower.rfind(final_marker) {
+        &raw[final_idx + final_marker.len()..]
+    } else if let Some(analysis_idx) = lower.find(analysis_marker) {
+        // Preserve a model's pre-analysis fallback when it does not finish a
+        // protocol-formatted final response. Some smaller local models produce
+        // useful text there even though their markers are imperfect.
+        &raw[..analysis_idx]
+    } else {
+        raw
+    };
+    let mut text = strip_chatty_output_markers(visible_raw);
 
     text = remove_tagged_block_case_insensitive(&text, "<think>", "</think>");
     text = remove_tagged_block_case_insensitive(&text, "<thinking>", "</thinking>");
@@ -11064,8 +13003,18 @@ fn is_meta_reasoning_paragraph(paragraph: &str) -> bool {
         "okay let's see",
         "okay, let's see",
         "the user just said",
+        "so the user wants",
+        "the user presumably",
+        "the user might",
+        "the user hasn't asked",
         "i need to",
         "i should",
+        "we need to answer",
+        "we need to provide",
+        "we need to give",
+        "we need to be concise",
+        "we must not",
+        "we should",
         "let me ",
         "maybe ",
         "maybe something like",
@@ -11073,6 +13022,10 @@ fn is_meta_reasoning_paragraph(paragraph: &str) -> bool {
         "that's better",
         "let me make sure",
         "the response should",
+        "given the instructions",
+        "the workflow might",
+        "the user asks:",
+        "the cold log says",
         "to match this style",
         "keep it concise",
         "in character",
@@ -11225,16 +13178,21 @@ fn split_assistant_output(raw: &str) -> (String, Option<String>) {
         ));
     }
 
-    let lower = cleaned_raw.to_ascii_lowercase();
+    let raw_lower = raw.to_ascii_lowercase();
     let analysis_marker = "<|channel|>analysis<|message|>";
     let final_marker = "<|channel|>final<|message|>";
-    if let Some(analysis_idx) = lower.find(analysis_marker) {
+    if let Some(analysis_idx) = raw_lower.find(analysis_marker) {
         let analysis_start = analysis_idx + analysis_marker.len();
-        let analysis_end = lower[analysis_start..]
+        let analysis_end = raw_lower[analysis_start..]
             .find(final_marker)
             .map(|idx| analysis_start + idx)
-            .unwrap_or(cleaned_raw.len());
-        let analysis = cleaned_raw[analysis_start..analysis_end].trim();
+            .unwrap_or(raw.len());
+        let analysis = raw[analysis_start..analysis_end]
+            .split("<|end|>")
+            .next()
+            .map(strip_chatty_output_markers)
+            .unwrap_or_default();
+        let analysis = analysis.trim();
         if !analysis.is_empty() {
             thinking_blocks.push(analysis.to_string());
         }
@@ -12198,7 +14156,10 @@ fn selected_model_inline_status(path: &Path, runtime_issue: Option<&str>) -> Opt
     }
 
     let extra_args = mtmd_extra_args_for_model(path, Some(&parts[0]));
-    if extra_args.windows(2).any(|pair| pair[0] == "--chat-template") {
+    if extra_args
+        .windows(2)
+        .any(|pair| pair[0] == "--chat-template")
+    {
         if let Some(template) = extra_args
             .windows(2)
             .find(|pair| pair[0] == "--chat-template")
@@ -12278,12 +14239,7 @@ fn run_mtmd_cli_generation(
             } else {
                 "mtmd runtime crashed with Windows exit code 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN)."
             };
-            anyhow::bail!(
-                "{}\n{}\n{}",
-                base,
-                stdout.trim(),
-                stderr.trim()
-            );
+            anyhow::bail!("{}\n{}\n{}", base, stdout.trim(), stderr.trim());
         }
         anyhow::bail!(
             "mtmd generation failed with status {}.\n{}\n{}",
@@ -12610,4 +14566,265 @@ fn now_unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn format_remember_recall_id(unix_ms: i64, sequence: u64) -> String {
+    format!("remember-recall-{}-{:06}", unix_ms, sequence)
+}
+
+fn filter_governance_receipts_view(view: &str, filter: &str) -> String {
+    let terms = filter
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return view.to_string();
+    }
+
+    let mut out = String::new();
+    let mut session_block = Vec::new();
+    for line in view.lines() {
+        if line.starts_with("  - recall_id=") {
+            flush_receipt_filter_session_block(&mut out, &mut session_block, &terms);
+            session_block.push(line.to_string());
+            continue;
+        }
+        if !session_block.is_empty()
+            && (line.starts_with("      ")
+                || line.starts_with("          *")
+                || line.trim().is_empty())
+        {
+            session_block.push(line.to_string());
+            continue;
+        }
+        flush_receipt_filter_session_block(&mut out, &mut session_block, &terms);
+        if line.trim().is_empty()
+            || line.ends_with("receipts")
+            || line.ends_with("current truth.")
+            || line.ends_with("cold logs.")
+            || line.contains("_receipts:")
+            || receipt_filter_line_matches(line, &terms)
+        {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    flush_receipt_filter_session_block(&mut out, &mut session_block, &terms);
+
+    if out.trim().is_empty() {
+        format!("No governance receipt lines match filter: {filter}")
+    } else {
+        out
+    }
+}
+
+fn flush_receipt_filter_session_block(
+    out: &mut String,
+    session_block: &mut Vec<String>,
+    terms: &[String],
+) {
+    if session_block.is_empty() {
+        return;
+    }
+    if session_block
+        .iter()
+        .any(|line| receipt_filter_line_matches(line, terms))
+    {
+        for line in session_block.drain(..) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    } else {
+        session_block.clear();
+    }
+}
+
+fn receipt_filter_line_matches(line: &str, terms: &[String]) -> bool {
+    let hay = line.to_lowercase();
+    terms.iter().all(|term| hay.contains(term))
+}
+
+fn merge_remember_candidates(
+    atlas_candidates: Vec<ColdMemoryCandidate>,
+    semantic_candidates: Vec<ColdMemoryCandidate>,
+    cold_candidates: Vec<ColdMemoryCandidate>,
+    max_candidates: usize,
+) -> Vec<ColdMemoryCandidate> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for candidate in atlas_candidates
+        .into_iter()
+        .chain(semantic_candidates)
+        .chain(cold_candidates)
+    {
+        let key = (
+            candidate.provenance.log_path.clone(),
+            candidate.provenance.context_start_event_index,
+            candidate.provenance.context_end_event_index,
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        merged.push(candidate);
+        if merged.len() >= max_candidates.max(1) {
+            break;
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chattycog_gui::memory::governor::ColdMemorySourceRef;
+
+    #[test]
+    fn remember_recall_id_includes_timestamp_and_padded_sequence() {
+        assert_eq!(
+            format_remember_recall_id(1_788_000_000_123, 7),
+            "remember-recall-1788000000123-000007"
+        );
+    }
+
+    #[test]
+    fn gpt_oss_channel_markers_keep_only_the_final_visible_answer() {
+        let raw = "<|start|>assistant<|channel|>analysis<|message|>I should answer plainly.<|end|><|start|>assistant<|channel|>final<|message|>Selected history is used with the next message only.<|end|>";
+
+        let (visible, thinking) = split_assistant_output(raw);
+
+        assert_eq!(
+            visible,
+            "Selected history is used with the next message only."
+        );
+        assert_eq!(thinking.as_deref(), Some("I should answer plainly."));
+        assert!(!visible.contains("<|"));
+    }
+
+    #[test]
+    fn gpt_oss_incomplete_protocol_keeps_preanalysis_fallback_visible() {
+        let raw = "We have to answer the user. Let's inspect the recalled context first. \
+<|end|><|start|>assistant<|channel|>analysis<|message|>No action needed.";
+
+        let (visible, thinking) = split_assistant_output(raw);
+
+        assert!(visible.starts_with("We have to answer the user."));
+        assert_eq!(thinking.as_deref(), Some("No action needed."));
+    }
+
+    #[test]
+    fn untagged_planning_monologue_remains_visible_when_no_final_exists() {
+        let raw = "So the user wants the workflow again. We need to answer with the workflow.\n\n\
+Given the instructions, we need to give a direct answer.\n\n\
+We must not overexplain; the workflow might refer to past preferences.";
+
+        let (visible, thinking) = split_assistant_output(raw);
+
+        assert!(visible.starts_with("So the user wants the workflow again."));
+        assert!(thinking.is_none());
+    }
+
+    #[test]
+    fn untagged_planning_monologue_keeps_a_following_plain_answer() {
+        let raw = "So the user wants the workflow again. We need to answer with the workflow.\n\n\
+The workflow is to keep projects and code separate from workflow preferences.";
+
+        let (visible, thinking) = split_assistant_output(raw);
+
+        assert_eq!(
+            visible,
+            "The workflow is to keep projects and code separate from workflow preferences."
+        );
+        assert!(thinking.is_some());
+    }
+
+    #[test]
+    fn governance_receipt_filter_keeps_empty_filter_as_pass_through() {
+        let view = "Remember session receipts\n  - recall_id=a\n";
+
+        assert_eq!(filter_governance_receipts_view(view, "  "), view);
+    }
+
+    #[test]
+    fn governance_receipt_filter_keeps_matching_remember_session_block() {
+        let view = "\
+Semantic governance receipts
+sort_receipts: 0
+
+Remember session receipts
+remember_sessions: 2
+
+  - recall_id=remember-recall-1 recall_events=1 attachment_events=0
+      recall outcome=searched at=1 candidates=1 selected=0 query=miso vet
+          * semantic:one lane=semantic_bucket source=cold_log.jsonl events 0..=1 matched=1 bucket=entity:people_places_pets placement=placement:one
+  - recall_id=remember-recall-2 recall_events=1 attachment_events=0
+      recall outcome=cancelled_no_injection at=2 candidates=1 selected=0 query=rust bridge
+          * semantic:two lane=semantic_bucket source=cold_log.jsonl events 2..=3 matched=3 bucket=topic:projects_code placement=placement:two
+";
+
+        let filtered = filter_governance_receipts_view(view, "projects_code");
+
+        assert!(filtered.contains("Remember session receipts"));
+        assert!(filtered.contains("recall_id=remember-recall-2"));
+        assert!(filtered.contains("rust bridge"));
+        assert!(!filtered.contains("recall_id=remember-recall-1"));
+        assert!(!filtered.contains("miso vet"));
+    }
+
+    #[test]
+    fn remember_candidate_merge_keeps_lane_priority_and_dedupes_context_ranges() {
+        fn candidate(
+            id: &str,
+            lane: ColdMemoryRecallLane,
+            start: usize,
+            end: usize,
+        ) -> ColdMemoryCandidate {
+            ColdMemoryCandidate {
+                id: id.to_string(),
+                score: 1.0,
+                title: id.to_string(),
+                preview: id.to_string(),
+                recall_trace: ColdMemoryRecallTrace {
+                    lane,
+                    reason: id.to_string(),
+                    bucket_id: None,
+                    bucket_label: None,
+                    placement_id: None,
+                    atlas: None,
+                },
+                matched_exchange: id.to_string(),
+                context_block: format!("{id} payload"),
+                provenance: ColdMemorySourceRef {
+                    log_path: PathBuf::from("cold_log.jsonl"),
+                    matched_event_index: start,
+                    context_start_event_index: start,
+                    context_end_event_index: end,
+                    matched_ts_unix_ms: 1,
+                    context_start_ts_unix_ms: Some(1),
+                    context_end_ts_unix_ms: Some(2),
+                },
+            }
+        }
+
+        let merged = merge_remember_candidates(
+            vec![candidate("atlas", ColdMemoryRecallLane::ColdAtlas, 0, 3)],
+            vec![candidate(
+                "semantic-duplicate",
+                ColdMemoryRecallLane::SemanticBucket,
+                0,
+                3,
+            )],
+            vec![candidate(
+                "cold",
+                ColdMemoryRecallLane::KeywordFallback,
+                4,
+                7,
+            )],
+            8,
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "atlas");
+        assert_eq!(merged[1].id, "cold");
+    }
 }

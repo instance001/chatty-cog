@@ -33,7 +33,9 @@ pub(super) fn left_sidebar_chat(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     });
 
     ui.add_space(8.0);
-    ui.small("Use the Models tab for local/cloud model selection, presets, and orchestrator tuning.");
+    ui.small(
+        "Use the Models tab for local/cloud model selection, presets, and orchestrator tuning.",
+    );
 
     ui.separator();
     ui.add_enabled_ui(app.is_generating, |ui| {
@@ -331,21 +333,24 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     let selected_label = selected_model_option_label(
         &model_opts,
         selected_hint.as_deref(),
-        app.gguf_path.as_ref().map(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string())
-        }).or_else(|| {
-            selected_hint.as_ref().and_then(|selection| {
-                if let Some(ResolvedModelTarget::Cloud { target, .. }) =
-                    app.resolve_model_selection(Some(selection), ModelLane::Orchestrator)
-                {
-                    Some(target.display_name)
-                } else {
-                    None
-                }
+        app.gguf_path
+            .as_ref()
+            .map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string())
             })
-        }),
+            .or_else(|| {
+                selected_hint.as_ref().and_then(|selection| {
+                    if let Some(ResolvedModelTarget::Cloud { target, .. }) =
+                        app.resolve_model_selection(Some(selection), ModelLane::Orchestrator)
+                    {
+                        Some(target.display_name)
+                    } else {
+                        None
+                    }
+                })
+            }),
     );
 
     ui.horizontal_wrapped(|ui| {
@@ -374,7 +379,7 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         if ui.button("Refresh").clicked() {
             app.models_cache = scan_ggufs(app.models_dir.as_deref());
         }
-        ui.small(format!("Max tokens {}", app.orch_max_tokens));
+        ui.small(format!("Reply cap: {} tokens", app.orch_max_tokens));
     });
     if let Some(path) = app.gguf_path.as_deref()
         && let Some(status) = selected_model_inline_status(
@@ -403,9 +408,9 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             .clone()
             .or_else(|| selected_sandbox_image.clone());
         let vision_ready = selected_model_is_vision_ready(path);
-        let selected_image_label = selected_image
-            .as_ref()
-            .map(|image_path| format_chat_selected_file_label(image_path, app.sandbox_dir.as_deref()));
+        let selected_image_label = selected_image.as_ref().map(|image_path| {
+            format_chat_selected_file_label(image_path, app.sandbox_dir.as_deref())
+        });
         let selected_image_source = if selected_chat_image.is_some() {
             Some("chat selection")
         } else if selected_sandbox_image.is_some() {
@@ -419,8 +424,7 @@ fn render_chat_model_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
             if let Some(label) = selected_image_label.as_deref() {
                 let image_label_response = ui.small(format!("Image: {label}"));
                 if let Some(image_path) = selected_image.as_ref() {
-                    let texture_name =
-                        format!("chat_selected_preview_{}", image_path.display());
+                    let texture_name = format!("chat_selected_preview_{}", image_path.display());
                     if let Some(texture) =
                         load_local_png_texture(ui.ctx(), image_path, &texture_name)
                     {
@@ -557,6 +561,9 @@ fn render_chat_input_panel(ui: &mut egui::Ui, app: &mut ChattyCogApp, send_now: 
     render_sandbox_task_controls(ui, app);
     ui.add_space(4.0);
 
+    render_remember_controls(ui, app);
+    ui.add_space(4.0);
+
     chat_actions::sync_pending_sandbox_actions(app);
     if !app.pending_sandbox_actions.is_empty() {
         render_pending_sandbox_actions(ui, app);
@@ -585,6 +592,245 @@ fn render_chat_input_panel(ui: &mut egui::Ui, app: &mut ChattyCogApp, send_now: 
         });
     }
     ui.add_space(2.0);
+}
+
+fn render_remember_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Remember");
+            ui.small("Find past chat, inspect it, then choose whether to use selected excerpts with your next message.");
+            let can_search = !app.composer.trim().is_empty() && !app.is_generating;
+            if ui
+                .add_enabled(can_search, egui::Button::new("Find matching past chat"))
+                .on_hover_text("Search using the draft in the composer. This does not send the draft or use any past chat in your next message.")
+                .clicked()
+            {
+                app.remember_current_input();
+            }
+            if app.remember_attached_context.is_some() {
+                if ui
+                    .button("Don't use with next message")
+                    .on_hover_text("Remove the selected historical excerpts before you send the next message.")
+                    .clicked()
+                {
+                    app.remember_attached_context = None;
+                    app.remember_status =
+                        "Selected history will not be used with the next message.".to_string();
+                }
+            }
+        });
+        ui.small("Find only: “Find past chat about [topic]. Don’t use it in my next message.”");
+        ui.small("Use once: “Find past chat about [topic], then assign the selected result to my next input.”");
+
+        if let Some(attachment) = &app.remember_attached_context {
+            ui.horizontal_wrapped(|ui| {
+                ui.small(format!(
+                    "Will be used with your next message only: {} selected historical excerpt(s).",
+                    attachment.candidates.len()
+                ));
+                ui.small("It will not become current memory or stay active after that message.");
+            });
+        }
+
+        if !app.remember_status.trim().is_empty() {
+            ui.small(app.remember_status.clone());
+        }
+
+        if !app.remember_candidates.is_empty() {
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.small(format!(
+                    "Past-chat results for: {}",
+                    truncate_for_ui(&app.remember_last_query, 120)
+                ));
+                if ui
+                    .button("Use selected with next message")
+                    .on_hover_text("Only ticked results are included when you send the draft. They are used once and then cleared.")
+                    .clicked()
+                {
+                    app.attach_selected_remember_context();
+                }
+                if ui
+                    .button("Close without using")
+                    .on_hover_text("Close these results without adding any past chat to your next message.")
+                    .clicked()
+                {
+                    app.cancel_remember_results();
+                }
+            });
+            ui.small("Nothing is added to your next message until you tick a result and choose “Use selected with next message.”");
+
+            egui::ScrollArea::vertical()
+                .id_salt("remember_results_scroll")
+                .max_height(260.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let candidates = app.remember_candidates.clone();
+                    for candidate in candidates {
+                        render_remember_candidate(ui, app, &candidate);
+                        ui.add_space(6.0);
+                    }
+                });
+        }
+    });
+}
+
+fn render_remember_candidate(
+    ui: &mut egui::Ui,
+    app: &mut ChattyCogApp,
+    candidate: &ColdMemoryCandidate,
+) {
+    egui::Frame::none()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let mut selected = app.remember_selected_ids.contains(&candidate.id);
+                if ui.checkbox(&mut selected, "").changed() {
+                    if selected {
+                        app.remember_selected_ids.insert(candidate.id.clone());
+                    } else {
+                        app.remember_selected_ids.remove(&candidate.id);
+                    }
+                }
+                ui.small("Use next");
+                ui.strong(&candidate.title);
+                ui.small(format!("score {:.3}", candidate.score));
+                ui.small(format!(
+                    "events {}..={}",
+                    candidate.provenance.context_start_event_index,
+                    candidate.provenance.context_end_event_index
+                ));
+            });
+            render_remember_candidate_recall_strip(ui, candidate);
+            render_remember_candidate_atlas_context(ui, candidate);
+            ui.add(egui::Label::new(candidate.preview.as_str()).wrap());
+            ui.small(format!(
+                "Why surfaced: {}",
+                candidate.recall_trace.ui_label()
+            ));
+            if let Some(summary) = app.remember_prior_feedback.get(&candidate.id) {
+                ui.small(summary.clone());
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.small("Mark:");
+                for feedback in [
+                    ColdMemoryCandidateFeedback::Stale,
+                    ColdMemoryCandidateFeedback::Misleading,
+                    ColdMemoryCandidateFeedback::Noise,
+                ] {
+                    let feedback_key = format!("{}:{}", candidate.id, feedback.as_str());
+                    let already_marked = app.remember_feedback_marked.contains(&feedback_key);
+                    if ui
+                        .add_enabled(
+                            !already_marked,
+                            egui::Button::new(feedback.display_label()),
+                        )
+                        .on_hover_text(
+                            "Record recall-quality feedback without changing cold logs, buckets, atlas records, or context.",
+                        )
+                        .clicked()
+                    {
+                        app.mark_remember_candidate_feedback(&candidate.id, feedback);
+                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                let is_open = app.remember_expanded_ids.contains(&candidate.id);
+                let label = if is_open {
+                    "Hide exact payload"
+                } else {
+                    "Show exact payload"
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text("Show the exact past-chat excerpt that would be included only if you choose to use this result with your next message.")
+                    .clicked()
+                {
+                    if is_open {
+                        app.remember_expanded_ids.remove(&candidate.id);
+                    } else {
+                        app.remember_expanded_ids.insert(candidate.id.clone());
+                    }
+                }
+                ui.small(format!(
+                    "Matched event {} in {}",
+                    candidate.provenance.matched_event_index,
+                    candidate.provenance.log_path.display()
+                ));
+            });
+            if app.remember_expanded_ids.contains(&candidate.id) {
+                ui.add_space(4.0);
+                ui.small("Exact past-chat excerpt. It is used only if you tick this result and choose “Use selected with next message.”");
+                let mut payload = candidate.context_block.clone();
+                egui::ScrollArea::vertical()
+                    .id_salt(("remember_payload", candidate.id.as_str()))
+                    .max_height(180.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut payload)
+                                .desired_rows(8)
+                                .code_editor()
+                                .interactive(false),
+                        );
+                    });
+            }
+        });
+}
+
+fn render_remember_candidate_recall_strip(ui: &mut egui::Ui, candidate: &ColdMemoryCandidate) {
+    ui.horizontal_wrapped(|ui| {
+        ui.small(format!(
+            "Lane: {}",
+            candidate.recall_trace.lane.display_label()
+        ));
+        if candidate.recall_trace.lane == ColdMemoryRecallLane::ColdAtlas {
+            if let Some(atlas_title) = candidate.recall_trace.bucket_label.as_deref() {
+                ui.small(format!("Atlas: {atlas_title}"));
+            }
+            if let Some(atlas_id) = candidate.recall_trace.bucket_id.as_deref() {
+                ui.small(format!("Atlas id: {atlas_id}"));
+            }
+        } else {
+            if let Some(bucket_label) = candidate.recall_trace.bucket_label.as_deref() {
+                ui.small(format!("Bucket: {bucket_label}"));
+            }
+            if let Some(bucket_id) = candidate.recall_trace.bucket_id.as_deref() {
+                ui.small(format!("Bucket id: {bucket_id}"));
+            }
+            if let Some(placement_id) = candidate.recall_trace.placement_id.as_deref() {
+                ui.small(format!("Placement: {}", truncate_for_ui(placement_id, 80)));
+            }
+        }
+    });
+    ui.small("Past-chat result only. It is not used unless you tick it and choose “Use selected with next message.”");
+}
+
+fn render_remember_candidate_atlas_context(ui: &mut egui::Ui, candidate: &ColdMemoryCandidate) {
+    let Some(atlas) = candidate.recall_trace.atlas.as_ref() else {
+        return;
+    };
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.small(format!("Atlas status: {}", atlas.status));
+            ui.small(format!(
+                "confidence {:.2} ({})",
+                atlas.confidence_score, atlas.confidence_label
+            ));
+            ui.small(format!("evidence ref {}", atlas.evidence_index + 1));
+        });
+        ui.small(format!("Atlas scope: {}", atlas.scope));
+        ui.add(egui::Label::new(format!("Atlas summary: {}", atlas.summary)).wrap());
+        ui.small(
+            "Atlas summary explains why this surfaced. It is not the exact payload that will be injected.",
+        );
+    });
 }
 
 fn render_sandbox_task_controls(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
@@ -883,8 +1129,8 @@ fn render_chat_columns(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
         return;
     }
 
-    let left_width =
-        ((total_width - min_center_width - (gap * 2.0)) * 0.5).clamp(min_side_width, max_side_width);
+    let left_width = ((total_width - min_center_width - (gap * 2.0)) * 0.5)
+        .clamp(min_side_width, max_side_width);
     let max_right_width = (total_width - left_width - min_center_width - (gap * 2.0))
         .clamp(min_side_width, max_side_width);
     let desired_right_width = app
@@ -928,7 +1174,12 @@ fn render_chat_columns(ui: &mut egui::Ui, app: &mut ChattyCogApp) {
     ui.spacing_mut().item_spacing = previous_spacing;
 }
 
-fn render_chat_columns_stacked(ui: &mut egui::Ui, app: &mut ChattyCogApp, panel_height: f32, gap: f32) {
+fn render_chat_columns_stacked(
+    ui: &mut egui::Ui,
+    app: &mut ChattyCogApp,
+    panel_height: f32,
+    gap: f32,
+) {
     let top_panel_height = (panel_height * 0.40).clamp(220.0, 360.0);
     let bottom_panel_height = (panel_height - top_panel_height - gap).max(260.0);
 
