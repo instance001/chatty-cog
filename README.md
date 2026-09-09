@@ -4,6 +4,10 @@ Local-first, tabbed desktop GUI for hybrid AI workflows on Windows.
 
 Core stance:
 
+Your brain.
+Your lane.
+Your AI venue.
+
 - local when you want privacy, low friction, and no account dependency
 - cloud when you need a stronger or more specialized model
 - hybrid when the task calls for the right tool rather than one ideology
