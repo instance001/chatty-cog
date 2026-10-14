@@ -2,6 +2,10 @@
 
 Local-first, tabbed desktop GUI for hybrid AI workflows on Windows.
 
+## License
+
+ChattyCog is released under the [GNU Affero General Public License v3.0](LICENSE).
+
 Core stance:
 
 Your brain.
