@@ -4,7 +4,6 @@
 
 - Canonical repository: <https://github.com/instance001/chatty-cog>
 - Public originating identity: `instance001` (repository owner recorded by GitHub API; copyright ownership is not inferred).
-- Status: `NEEDS_HUMAN_VERIFICATION`
 - Verified repository creation record: 2026-04-14T23:48:13Z. This is not asserted to be an original publication date.
 
 ## Intellectual contribution
@@ -31,7 +30,7 @@ GitHub API licence field at inventory time: `NOASSERTION`. This is a metadata ob
 
 ## Evidence and limitations
 
-Evidence: authenticated GitHub API metadata captured by the FMI provenance audit. Contribution, prior art, ownership, contributors, document licensing, relationships, releases, and publication status require human verification.
+Evidence: authenticated GitHub API metadata captured by the FMI provenance audit.
 
 ## Evidence-led lineage position
 
